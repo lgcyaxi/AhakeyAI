@@ -11,7 +11,7 @@ namespace BLE_tcp_driver
     {
         public string BleName { get; set; } = "";
         public string BleMac { get; set; } = "";
-        public string ServerIP { get; set; } = "0.0.0.0";
+        public string ServerIP { get; set; } = "127.0.0.1";
         public int ServerPort { get; set; } = 9000;
         public bool StartMinimized { get; set; } = false;
 
@@ -31,8 +31,8 @@ namespace BLE_tcp_driver
                 var config = new AppConfig();
                 config.BleName = JsonExtractString(json, "BleName");
                 config.BleMac = JsonExtractString(json, "BleMac");
-                config.ServerIP = JsonExtractString(json, "ServerIP");
-                if (string.IsNullOrEmpty(config.ServerIP)) config.ServerIP = "0.0.0.0";
+                // The bridge is a local control surface, never a LAN service.
+                config.ServerIP = "127.0.0.1";
                 config.ServerPort = JsonExtractInt(json, "ServerPort", 9000);
                 config.StartMinimized = JsonExtractBool(json, "StartMinimized", false);
                 return config;

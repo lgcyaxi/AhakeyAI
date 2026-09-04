@@ -12,9 +12,13 @@
 ### Windows — Java 客户端
 
 - 目录：`ahakeyconfig-win-java/`
-- 技术栈：Java · JavaFX（Maven），入口 `com.example.ahakey.Main`
+- 技术栈：Java · JavaFX（Maven），入口 `com.example.ahakey.App`
 - 构建：`mvn -q package`
-- 打包入口（PowerShell）：`build-exe.ps1` / `build-installer.ps1`
+- 应用镜像：`build-exe.ps1`（`build-exe.bat` 调用同一入口）
+- 安装器：`build-installer.ps1`
+- 两个入口都会运行测试、构建同级 `BLE_tcp_bridge/`，并要求把
+  `BLE_tcp_driver.exe` 与其 `.config` 一起打包。Windows 麦克风（包括 DJI
+  接收器）只承载音频，不是 AhaKey 配置设备，也不替代 BLE 配置通道。
 
 ### Windows — Python 客户端（Capswriter 基线）
 
@@ -67,5 +71,7 @@
 
 ## Windows 打包脚本
 
-- Windows 安装包脚本在 `ahakeyconfig-win-java/`：`build-exe.ps1`、`build-exe.bat`、`build-installer.ps1`。
+- Windows 构建脚本在 `ahakeyconfig-win-java/`：`build-exe.ps1`、其批处理包装器
+  `build-exe.bat`，以及 `build-installer.ps1`。缺少 BLE 配置桥时构建会失败，
+  不再生成不完整的发布包。
 - 构建产物不入库，正式安装包统一通过 GitHub Releases 分发。

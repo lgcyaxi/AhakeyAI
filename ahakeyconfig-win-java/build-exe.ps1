@@ -5,30 +5,93 @@ Requires: JDK 17+, Maven 3.6+
 Usage: .\build-exe.ps1
 #>
 
-$ErrorActionPreference = "Continue"
+$ErrorActionPreference = "Stop"
 
 $ProjectName = "AhaKeyStudio"
-$Version = "1.0.0"
+$Version = "1.0.1"
 $MainClass = "com.example.ahakey.App"
 $TargetDir = Join-Path $PSScriptRoot "target"
+$MavenRepo = Join-Path $TargetDir ".m2repo"
 $InstallerDir = "$TargetDir/installer"
 $TempDir = "$TargetDir/jpackage-input"
 $RuntimeDir = "$TargetDir/runtime"
 $ResourceDir = "$TargetDir/jpackage-resources"
 $IconPath = Join-Path $PSScriptRoot "VibeCodeKeyboard.ico"
+$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$BleProjectRoot = Join-Path $RepositoryRoot "BLE_tcp_bridge"
+$BleProject = Join-Path $BleProjectRoot "BLE_tcp_driver.csproj"
+$BleOutputDir = Join-Path $BleProjectRoot "bin\Release"
 
 function Write-Status($Message, $Color) {
     Write-Host "[$(Get-Date -Format HH:mm:ss)] " -NoNewline
     Write-Host $Message -ForegroundColor $Color
 }
 
-Write-Status "AhaKey Studio Build Script v1.0" Cyan
+function Find-MSBuild {
+    $command = Get-Command MSBuild.exe -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path -LiteralPath $vswhere) {
+        $candidate = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild `
+            -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return $candidate
+        }
+    }
+    throw "MSBuild.exe was not found. Install Visual Studio Build Tools with the .NET desktop workload."
+}
+
+function Get-RunningProcessesUnderPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProcessName,
+        [Parameter(Mandatory = $true)][string]$RootPath
+    )
+
+    $normalizedRoot = [System.IO.Path]::GetFullPath($RootPath).TrimEnd('\') + '\'
+    @(
+        Get-CimInstance Win32_Process -Filter "Name = '$ProcessName'" -ErrorAction Stop |
+            Where-Object {
+                $_.ExecutablePath -and
+                [System.IO.Path]::GetFullPath($_.ExecutablePath).StartsWith(
+                    $normalizedRoot,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )
+}
+
+Write-Status "AhaKey Studio Build Script v$Version" Cyan
 Write-Status "==============================" Cyan
+
+if (-not (Test-Path -LiteralPath $BleProject)) {
+    Write-Status "ERROR: Required sibling BLE bridge project not found: $BleProject" Red
+    exit 1
+}
+
+$msbuild = Find-MSBuild
+Write-Status "Building required BLE configuration bridge..." Cyan
+& $msbuild $BleProject /restore /t:Build /p:Configuration=Release /p:Platform=AnyCPU /nologo
+if ($LASTEXITCODE -ne 0) {
+    Write-Status "ERROR: BLE bridge build failed" Red
+    exit 1
+}
+$bleExeSource = Join-Path $BleOutputDir "BLE_tcp_driver.exe"
+$bleConfigSource = Join-Path $BleOutputDir "BLE_tcp_driver.exe.config"
+foreach ($requiredBleFile in $bleExeSource, $bleConfigSource) {
+    if (-not (Test-Path -LiteralPath $requiredBleFile)) {
+        Write-Status "ERROR: Required BLE bridge output not found: $requiredBleFile" Red
+        exit 1
+    }
+}
+Write-Status "BLE configuration bridge build successful" Green
 
 # Build project (must run from script directory so Maven finds pom.xml)
 Set-Location $PSScriptRoot
 Write-Status "Building project..." Cyan
-& mvn "-Dmaven.repo.local=.m2repo" package -DskipTests
+& mvn "-Dmaven.repo.local=$MavenRepo" package
 
 if ($LASTEXITCODE -ne 0) {
     Write-Status "ERROR: Maven build failed" Red
@@ -39,10 +102,14 @@ Write-Status "Maven build successful" Green
 # Clean old installer
 if (Test-Path $InstallerDir) {
     Write-Status "Removing old installer..." Yellow
-    $runningProcesses = @(Get-Process -Name "AhaKeyStudio" -ErrorAction SilentlyContinue)
+    $runningProcesses = @(
+        Get-RunningProcessesUnderPath `
+            -ProcessName "$ProjectName.exe" `
+            -RootPath $InstallerDir
+    )
     if ($runningProcesses.Count -gt 0) {
-        $runningPids = ($runningProcesses | ForEach-Object Id) -join ", "
-        Write-Status "ERROR: AhaKey Studio is running (PID $runningPids). Exit it before rebuilding." Red
+        $runningPids = ($runningProcesses | ForEach-Object ProcessId) -join ", "
+        Write-Status "ERROR: AhaKey Studio is running from the build output (PID $runningPids). Exit that test instance before rebuilding." Red
         exit 1
     }
 
@@ -178,22 +245,20 @@ if ($LASTEXITCODE -ne 0) {
 Write-Status "App Image created successfully!" Green
 Write-Status "Output location: $InstallerDir\$ProjectName" Cyan
 
-# Copy BLE TCP bridge driver
-$bleCandidates = @(
-    ".\BLE_tcp_driver.exe",
-    "..\BLE_tcp_driver.exe",
-    "..\ahakeyconfig-win\BLE_tcp_bridge_for_vibe_code-master (1)\BLE_tcp_bridge_for_vibe_code-master\dist\BLE_tcp_driver.exe"
-)
-$bleExeSource = $bleCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-if ($bleExeSource) {
-    Write-Status "Copying BLE TCP driver..." Cyan
-    Copy-Item -Path $bleExeSource -Destination "$InstallerDir\$ProjectName\BLE_tcp_driver.exe" -Force
-    Write-Status "BLE driver copied to app image" Green
-} else {
-    Write-Status "WARNING: BLE driver not found" Yellow
-    Write-Status "Run build-single-exe.bat in the BLE project first, or copy BLE_tcp_driver.exe manually." Yellow
+# Copy the required bridge from the fixed sibling project built above. Never
+# copy config_server.json because it contains per-machine BLE identity.
+Write-Status "Copying BLE configuration bridge..." Cyan
+$appImageRoot = Join-Path $InstallerDir $ProjectName
+Copy-Item -LiteralPath $bleExeSource -Destination (Join-Path $appImageRoot "BLE_tcp_driver.exe") -Force
+Copy-Item -LiteralPath $bleConfigSource -Destination (Join-Path $appImageRoot "BLE_tcp_driver.exe.config") -Force
+foreach ($requiredBundledFile in "BLE_tcp_driver.exe", "BLE_tcp_driver.exe.config") {
+    $bundledPath = Join-Path $appImageRoot $requiredBundledFile
+    if (-not (Test-Path -LiteralPath $bundledPath)) {
+        Write-Status "ERROR: Required BLE bridge file was not bundled: $bundledPath" Red
+        exit 1
+    }
 }
+Write-Status "BLE configuration bridge copied to app image" Green
 
 # Cleanup temporary directories
 Remove-Item -Path $TempDir -Recurse -Force -ErrorAction SilentlyContinue

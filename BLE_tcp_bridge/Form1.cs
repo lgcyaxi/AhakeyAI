@@ -188,6 +188,7 @@ namespace BLE_tcp_driver
                 retryTimer.Stop();
                 autoConnecting = false;
                 targetConfirmed = false;
+                tcpServer?.ResetDeviceStatus();
             }));
         }
 
@@ -198,6 +199,7 @@ namespace BLE_tcp_driver
                 log(Color.Red, "Disconnected:" + (bluetoothLEDevice?.Name ?? ""));
                 label_connected_devices.Text = "当前连接设备:无";
                 autoConnecting = false;
+                tcpServer?.ResetDeviceStatus();
 
                 if (config.HasSavedDevice)
                 {
@@ -278,6 +280,7 @@ namespace BLE_tcp_driver
                     log(Color.OrangeRed, $"设备 [{devName}] 未找齐目标UUID, 断开连接");
                     bleCore.Dispose();
                     label_connected_devices.Text = "当前连接设备:无";
+                    tcpServer?.ResetDeviceStatus();
 
                     if (config.HasSavedDevice)
                     {

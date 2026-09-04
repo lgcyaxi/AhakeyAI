@@ -168,8 +168,8 @@ public class AhaKeyProtocol {
             return null;  // 忽略这个帧，不更新状态
         }
         
-        // 处理完整的状态查询响应（12字节）
-        if (data.length < 12) return null;
+        // 完整状态响应固定为 13 字节：帧头 + 命令 + 8 字节状态 + 帧尾。
+        if (data.length != 13) return null;
         if (cmd != CMD_QUERY_STATUS) return null;
         
         int base = 3;  // payloadStart + 1
@@ -181,9 +181,7 @@ public class AhaKeyProtocol {
         status.setWorkMode(data[base + 4] & 0xFF);
         status.setLightMode(data[base + 5] & 0xFF);
         status.setSwitchState(data[base + 6] & 0xFF);
-        if (data.length > base + 7) {
-            status.setLightBrightness(data[base + 7] & 0xFF);
-        }
+        status.setLightBrightness(data[base + 7] & 0xFF);
         
         return status;
     }

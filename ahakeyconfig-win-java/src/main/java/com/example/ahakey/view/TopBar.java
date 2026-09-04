@@ -103,7 +103,8 @@ public class TopBar extends VBox {
             new InfoPill(
                 Bindings.createStringBinding(() -> "电量"),
                 Bindings.createStringBinding(
-                    () -> controller.isEffectivelyConnected() ? deviceStatus.getBatteryLevel() + "%" : "—",
+                    () -> controller.isEffectivelyConnected() && deviceStatus.getBatteryLevel() >= 0
+                        ? deviceStatus.getBatteryLevel() + "%" : "—",
                     deviceStatus.isConnectedProperty(),
                     deviceStatus.batteryLevelProperty()
                 ),
@@ -123,9 +124,12 @@ public class TopBar extends VBox {
         Button connectButton = new Button();
         connectButton.getStyleClass().add("button-connect");
         connectButton.textProperty().bind(Bindings.createStringBinding(
-            () -> deviceStatus.isConnected() ? "断开连接" : "连接设备",
-            deviceStatus.isConnectedProperty()
+            () -> deviceStatus.isConnected() ? "断开连接"
+                : (deviceStatus.isScanning() ? "正在连接…" : "连接设备"),
+            deviceStatus.isConnectedProperty(),
+            deviceStatus.isScanningProperty()
         ));
+        connectButton.disableProperty().bind(deviceStatus.isScanningProperty());
         // 连接状态变化时切换按钮样式
         deviceStatus.isConnectedProperty().addListener((obs, oldVal, newVal) -> {
             connectButton.getStyleClass().removeAll("button-connect", "button-disconnect");
@@ -140,7 +144,7 @@ public class TopBar extends VBox {
         });
 
         // BLE 驱动按钮
-        Button bleButton = new Button("BLE驱动");
+        Button bleButton = new Button("BLE 配置驱动");
         bleButton.getStyleClass().add("button-ble");
         bleButton.setOnAction(event -> handleBleButtonClick());
 
@@ -320,21 +324,23 @@ public class TopBar extends VBox {
      * - 否则启动同级目录下的 BLE_tcp_driver.exe
      */
     private void handleBleButtonClick() {
-        if (isBleDriverRunning()) {
-            if (isBleBridgeReachable()) {
-                Alert alert = new Alert(Alert.AlertType.INFORMATION);
-                alert.setTitle("BLE 驱动");
-                alert.setHeaderText(null);
-                alert.setContentText("BLE 驱动已打开");
-                alert.showAndWait();
-            } else {
-                stopBleDriverProcess();
-                launchBleDriver();
-            }
-        } else {
-            // 启动 BLE 驱动
-            launchBleDriver();
+        if (isBleBridgeReachable()) {
+            controller.userConnect();
+            showInfo(
+                "BLE 配置驱动",
+                "BLE 配置驱动已就绪，正在查询 AhaKey 设备。Windows 麦克风是独立的音频通道。"
+            );
+            return;
         }
+        if (isBleDriverRunning()) {
+            showAlert(
+                "BLE 配置驱动",
+                "BLE_tcp_driver.exe 正在运行，但本机配置服务 127.0.0.1:9000 不可用。" +
+                "请从驱动窗口或托盘图标退出后重试；AhaKey Studio 不会强制结束其他进程。"
+            );
+            return;
+        }
+        launchBleDriver();
     }
 
     private boolean isBleBridgeReachable() {
@@ -343,14 +349,6 @@ public class TopBar extends VBox {
             return true;
         } catch (Exception e) {
             return false;
-        }
-    }
-
-    private void stopBleDriverProcess() {
-        try {
-            new ProcessBuilder("taskkill", "/F", "/IM", "BLE_tcp_driver.exe").redirectErrorStream(true).start().waitFor();
-            Thread.sleep(300);
-        } catch (Exception ignored) {
         }
     }
     
@@ -417,29 +415,38 @@ public class TopBar extends VBox {
                 final File finalBleExe = bleExe;
                 ProcessBuilder pb = new ProcessBuilder(finalBleExe.getAbsolutePath());
                 pb.directory(finalBleExe.getParentFile());
-                pb.start();
-                
-                // 短暂延迟后再次检查，给用户反馈
-                new Thread(() -> {
+                Process process = pb.start();
+
+                Thread readinessMonitor = new Thread(() -> {
                     try {
-                        Thread.sleep(1000);
-                        Platform.runLater(() -> {
-                            if (isBleDriverRunning()) {
-                                // 启动成功，无需额外提示
-                            } else {
-                                showAlert("BLE 驱动", "BLE 驱动启动失败，请手动运行: " + finalBleExe.getAbsolutePath());
+                        for (int attempt = 0; attempt < 40; attempt++) {
+                            if (isBleBridgeReachable()) {
+                                Platform.runLater(controller::userConnect);
+                                return;
                             }
-                        });
+                            if (!process.isAlive()) {
+                                break;
+                            }
+                            Thread.sleep(250);
+                        }
+                        Platform.runLater(() -> showAlert(
+                            "BLE 配置驱动",
+                            "BLE 配置驱动已启动，但 10 秒内未提供本机配置服务。" +
+                            "请查看驱动窗口中的蓝牙错误后重试。"
+                        ));
                     } catch (Exception ignored) {}
-                }).start();
+                }, "ble-driver-readiness");
+                readinessMonitor.setDaemon(true);
+                readinessMonitor.start();
             } else {
-                showAlert("BLE 驱动", "未找到 BLE_tcp_driver.exe\n已尝试以下位置:\n" 
-                    + new File(appDir, "BLE_tcp_driver.exe").getAbsolutePath() + "\n"
-                    + (appDirFile.getParentFile() != null ? new File(appDirFile.getParentFile(), "BLE_tcp_driver.exe").getAbsolutePath() : "") + "\n"
-                    + new File(System.getProperty("user.dir"), "BLE_tcp_driver.exe").getAbsolutePath());
+                showAlert(
+                    "BLE 配置驱动",
+                    "当前安装不完整：未找到 BLE_tcp_driver.exe。Windows 麦克风仍可用于录音，" +
+                    "但它不代表 AhaKey 配置通道已连接。请安装包含 BLE 配置驱动的完整版本。"
+                );
             }
         } catch (Exception e) {
-            showAlert("BLE 驱动", "启动失败: " + e.getMessage());
+            showAlert("BLE 配置驱动", "启动失败: " + e.getMessage());
         }
     }
     
@@ -448,6 +455,14 @@ public class TopBar extends VBox {
      */
     private void showAlert(String title, String content) {
         Alert alert = new Alert(Alert.AlertType.WARNING);
+        alert.setTitle(title);
+        alert.setHeaderText(null);
+        alert.setContentText(content);
+        alert.showAndWait();
+    }
+
+    private void showInfo(String title, String content) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
         alert.setTitle(title);
         alert.setHeaderText(null);
         alert.setContentText(content);
@@ -654,14 +669,20 @@ public class TopBar extends VBox {
         Label batteryStatus = new Label();
         batteryStatus.getStyleClass().add("dialog-text");
         batteryStatus.textProperty().bind(Bindings.createStringBinding(() ->
-            "电量: " + this.deviceStatus.getBatteryLevel() + "%",
+            "电量: " + (this.deviceStatus.isConnected() && this.deviceStatus.getBatteryLevel() >= 0
+                ? this.deviceStatus.getBatteryLevel() + "%" : "—"),
+            this.deviceStatus.isConnectedProperty(),
             this.deviceStatus.batteryLevelProperty()
         ));
         deviceRow1.getChildren().addAll(connStatus, batteryStatus);
 
         HBox deviceRow2 = new HBox(16);
-        Label deviceName = new Label("设备名: " + (this.deviceStatus.getDeviceName() != null ? this.deviceStatus.getDeviceName() : "—"));
+        Label deviceName = new Label();
         deviceName.getStyleClass().add("dialog-text");
+        deviceName.textProperty().bind(Bindings.createStringBinding(() ->
+            "设备名: " + (this.deviceStatus.getDeviceName() != null ? this.deviceStatus.getDeviceName() : "—"),
+            this.deviceStatus.deviceNameProperty()
+        ));
         Label switchState = new Label();
         switchState.getStyleClass().add("dialog-text");
         switchState.textProperty().bind(Bindings.createStringBinding(() ->
