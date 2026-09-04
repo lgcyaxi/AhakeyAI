@@ -24,8 +24,8 @@ def run():
         # raw = sys.stdin.read()
         raw = '''{
     "session_id": "abc123",
-    "transcript_path": "/Users/.../.claude/projects/.../00893aaf-19fa-41d2-8238-13269b9b3ca0.jsonl",
-    "cwd": "/Users/...",
+    "transcript_path": "~/.claude/projects/example/session.jsonl",
+    "cwd": "~",
     "permission_mode": "default",
     "hook_event_name": "PermissionRequest",
     "tool_name": "Bash",

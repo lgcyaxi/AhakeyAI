@@ -63,7 +63,7 @@ Key4  Enter
 
 参考代码位置：
 
-- [mode_page.py](/Users/macbookforpp/Desktop/macmac/待适配mac/vibe_code_config_tool-master/src/ui/pages/mode_page.py)
+- [mode_page.py](src/ui/pages/mode_page.py)
 
 关键实现点：
 
@@ -180,7 +180,7 @@ Windows 端不一定要使用相同路径，但请保留这个能力：
 
 顶部按钮组件：
 
-- [connection_bar.py](/Users/macbookforpp/Desktop/macmac/待适配mac/vibe_code_config_tool-master/src/ui/widgets/connection_bar.py)
+- [connection_bar.py](src/ui/widgets/connection_bar.py)
 
 关键点：
 
@@ -192,7 +192,7 @@ Windows 端不一定要使用相同路径，但请保留这个能力：
 
 主窗口持久化与同步：
 
-- [main_window.py](/Users/macbookforpp/Desktop/macmac/待适配mac/vibe_code_config_tool-master/src/ui/main_window.py)
+- [main_window.py](src/ui/main_window.py)
 
 关键点：
 
