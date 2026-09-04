@@ -25,7 +25,8 @@ import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
 /**
- * 对齐 macOS {@code VoiceRelayService} 的 Windows 子集：低级别键盘钩子吞掉 F17/F18，触发 Win+H。
+ * Windows F17/F18 relay. The selected VoicePreset decides whether a matching
+ * key opens Windows Voice Typing or starts the optional local model.
  */
 public final class WindowsVoiceRelayService {
     private static final int WH_KEYBOARD_LL = 13;
@@ -52,7 +53,12 @@ public final class WindowsVoiceRelayService {
     private Runnable onSimulateRecordStart;
     private Runnable onSimulateRecordStop;
 
-    private record VoiceRoute(int vkCode, ModeSlot mode, boolean factoryFallback) {
+    private record VoiceRoute(
+        int vkCode,
+        ModeSlot mode,
+        VoicePreset preset,
+        boolean factoryFallback
+    ) {
     }
 
     private final List<VoiceRoute> routes = new ArrayList<>();
@@ -123,10 +129,9 @@ public final class WindowsVoiceRelayService {
             var key = state.getKeyConfig(mode, StudioPart.KEY1);
             VoicePreset preset = key.getVoicePreset();
             
-            // 只处理支持的语音预设：Windows 原生、macOS 原生、自定义
-            if (preset != VoicePreset.WINDOWS_NATIVE && 
-                preset != VoicePreset.MACOS_NATIVE && 
-                preset != VoicePreset.CUSTOM) {
+            // WeChat/custom shortcuts are emitted directly by the keyboard.
+            if (preset != VoicePreset.WINDOWS_NATIVE
+                && preset != VoicePreset.LOCAL_MODEL) {
                 continue;
             }
             
@@ -134,9 +139,9 @@ public final class WindowsVoiceRelayService {
             if (vk <= 0) {
                 continue;
             }
-            routes.add(new VoiceRoute(vk, mode, false));
+            routes.add(new VoiceRoute(vk, mode, preset, false));
             if (mode == ModeSlot.MODE0 && vk != VK_F18) {
-                routes.add(new VoiceRoute(VK_F18, ModeSlot.MODE0, true));
+                routes.add(new VoiceRoute(VK_F18, ModeSlot.MODE0, preset, true));
             }
         }
         if (routes.isEmpty()) {
@@ -147,7 +152,11 @@ public final class WindowsVoiceRelayService {
                 if (!sb.isEmpty()) {
                     sb.append(" · ");
                 }
-                sb.append(r.mode.getShortName()).append(" VK=").append(String.format("0x%02X", r.vkCode));
+                sb.append(r.mode.getShortName())
+                    .append(" ")
+                    .append(r.preset.getDisplayName())
+                    .append(" VK=")
+                    .append(String.format("0x%02X", r.vkCode));
             }
             activeRouteSummary.set(sb.toString());
         }
@@ -201,12 +210,10 @@ public final class WindowsVoiceRelayService {
         VoiceRoute route = routes.stream().filter(r -> r.mode == mode && !r.factoryFallback).findFirst()
             .orElse(routes.stream().filter(r -> r.mode == mode).findFirst().orElse(null));
         if (route == null) {
-            // 检查是否是 macOS 原生语音模式（使用 F18）
-            lastSimulateHint.set("当前 Mode 没有 Win+H 语音路由。");
+            lastSimulateHint.set("当前 Mode 没有需要 Studio 接管的语音路由。");
             return;
         }
-        WindowsVoiceTyping.trigger();
-        lastSimulateHint.set("已模拟 Win+H（" + mode.getShortName() + "）");
+        simulateVoiceKeyTap(mode, route.preset);
     }
     
     /**
@@ -214,18 +221,16 @@ public final class WindowsVoiceRelayService {
      */
     public void simulateVoiceKeyTap(ModeSlot mode, VoicePreset preset) {
         switch (preset) {
-            case WINDOWS_NATIVE:
-                // 使用 Win+H
-                simulateVoiceKeyTap(mode);
-                break;
-            case MACOS_NATIVE:
-                // 对于本地模型，直接触发录音回调（模拟的按键不会被键盘钩子捕获）
+            case WINDOWS_NATIVE -> {
+                WindowsVoiceTyping.trigger();
+                lastSimulateHint.set("已发送 Win+H（" + mode.getShortName() + "）");
+            }
+            case LOCAL_MODEL -> {
                 if (onSimulateRecordStart != null) {
                     onSimulateRecordStart.run();
-                    // 延迟一段时间后自动停止录音
                     new Thread(() -> {
                         try {
-                            Thread.sleep(3); // 录制3秒
+                            Thread.sleep(3000);
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
                         }
@@ -233,15 +238,21 @@ public final class WindowsVoiceRelayService {
                             onSimulateRecordStop.run();
                         }
                     }).start();
-                    lastSimulateHint.set("已开始录音（模拟 F18，录制3秒）");
+                    lastSimulateHint.set("已开始本地录音（3 秒测试）");
                 } else {
-                    // 如果没有设置回调，尝试模拟按键
-                    simulateF18Key();
-                    lastSimulateHint.set("已模拟 F18（" + mode.getShortName() + "）");
+                    lastSimulateHint.set("本地模型未启用，无法开始录音。");
                 }
-                break;
-            default:
-                lastSimulateHint.set("当前语音预设不支持模拟。");
+            }
+            case WECHAT, CUSTOM -> {
+                StudioState state = studioStateSupplier.get();
+                if (state == null) {
+                    lastSimulateHint.set("语音配置尚未加载。");
+                    return;
+                }
+                simulateKeyByHid(state.getKeyConfig(mode, StudioPart.KEY1).getHidCode());
+            }
+            case MACOS_NATIVE, TYPELESS ->
+                lastSimulateHint.set("当前语音预设不受 Windows 客户端支持。");
         }
     }
     
@@ -286,7 +297,9 @@ public final class WindowsVoiceRelayService {
         for (int i = modVks.size() - 1; i >= 0; i--) { fillKey(inputs[idx++], modVks.get(i), true); }
 
         User32.INSTANCE.SendInput(new WinUser.DWORD(total), inputs, inputs[0].size());
-        String desc = com.example.ahakey.model.HIDUsage.getName(baseHid);
+        String desc = baseVk >= 0
+            ? com.example.ahakey.model.HIDUsage.getName(baseHid)
+            : "";
         if (!modVks.isEmpty()) {
             java.util.List<String> names = new java.util.ArrayList<>();
             if ((hidCode & 0x100) != 0) names.add("LShift");
@@ -297,7 +310,7 @@ public final class WindowsVoiceRelayService {
             if ((hidCode & 0x4000) != 0) names.add("RAlt");
             if ((hidCode & 0x800) != 0) names.add("LWin");
             if ((hidCode & 0x8000) != 0) names.add("RWin");
-            desc = String.join("+", names) + "+" + desc;
+            desc = String.join("+", names) + (desc.isEmpty() ? "" : "+" + desc);
         }
         lastSimulateHint.set("已模拟 " + desc);
     }
@@ -429,8 +442,9 @@ public final class WindowsVoiceRelayService {
         }
         int upFlag = 0x0080;
         if ((evt.flags & upFlag) != 0) {
-            // 按键释放
-            if (message == WM_KEYUP && onVoiceKeyUp != null) {
+            if (message == WM_KEYUP
+                && route.preset == VoicePreset.LOCAL_MODEL
+                && onVoiceKeyUp != null) {
                 onVoiceKeyUp.run();
             }
             return new LRESULT(1);
@@ -439,13 +453,16 @@ public final class WindowsVoiceRelayService {
             return new LRESULT(1);
         }
         if (message == WM_KEYDOWN) {
-            // 按键按下
-            // 添加防抖检查，避免重复触发
-            if (onVoiceKeyDown != null) {
-                onVoiceKeyDown.run();
-            } else {
-                // 如果没有设置自定义回调，使用默认行为（发送 Win+H）
+            if (route.preset == VoicePreset.WINDOWS_NATIVE) {
                 WindowsVoiceTyping.trigger();
+            } else if (route.preset == VoicePreset.LOCAL_MODEL) {
+                if (onVoiceKeyDown != null) {
+                    onVoiceKeyDown.run();
+                } else {
+                    Platform.runLater(() ->
+                        statusMessage.set("已选择本地模型，但本地语音服务未启用。")
+                    );
+                }
             }
         }
         return new LRESULT(1);
@@ -485,7 +502,10 @@ public final class WindowsVoiceRelayService {
             statusMessage.set("语音桥未运行；进入编辑配置或启动应用后会自动安装钩子。");
             return;
         }
-        statusMessage.set("正在监听 F17/F18 语音键，匹配后发送 Win+H（路由 " + routes.size() + " 条）。");
+        statusMessage.set(
+            "正在监听 F17/F18，并按每个 Mode 的语音方式路由（"
+                + routes.size() + " 条；微信/自定义由键盘直发）。"
+        );
     }
 
     private static int hidToVk(int hid) {

@@ -8,7 +8,7 @@ Usage: .\build-exe.ps1
 $ErrorActionPreference = "Stop"
 
 $ProjectName = "AhaKeyStudio"
-$Version = "1.0.1"
+$Version = "1.0.2"
 $MainClass = "com.example.ahakey.App"
 $TargetDir = Join-Path $PSScriptRoot "target"
 $MavenRepo = Join-Path $TargetDir ".m2repo"

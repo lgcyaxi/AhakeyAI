@@ -356,6 +356,7 @@ public class StudioState {
     }
 
     public void loadFromPersisted(PersistedDraft draft) {
+        boolean migratedVoiceConfiguration = false;
         for (int i = 0; i < ModeSlot.values().length; i++) {
             ModeSlot mode = ModeSlot.values()[i];
             PersistedDraft.ModeDraft md = draft.modes[i];
@@ -373,11 +374,28 @@ public class StudioState {
             od.setStatusLine(md.oledSummary);
             od.setCaptionLine(md.oledCaption);
             var k1 = map.get(StudioPart.KEY1);
+            VoicePreset voicePreset = k1.getVoicePreset();
             if (md.voicePresetId != null) {
                 try {
-                    k1.setVoicePreset(VoicePreset.valueOf(md.voicePresetId));
+                    voicePreset = VoicePreset.valueOf(md.voicePresetId);
                 } catch (IllegalArgumentException ignored) {
-                    k1.setVoicePreset(VoicePreset.WINDOWS_NATIVE);
+                    voicePreset = VoicePreset.WINDOWS_NATIVE;
+                    migratedVoiceConfiguration = true;
+                }
+            }
+            // Older Windows builds forced Key1 to CUSTOM while still treating
+            // the factory F17/F18 bindings as Windows Voice Typing routes.
+            if (voicePreset == VoicePreset.CUSTOM
+                && (k1.getHidCode() == HIDUsage.F17 || k1.getHidCode() == HIDUsage.F18)) {
+                voicePreset = VoicePreset.WINDOWS_NATIVE;
+                migratedVoiceConfiguration = true;
+            }
+            k1.setVoicePreset(voicePreset);
+            if (voicePreset.locksShortcut()) {
+                int normalizedHid = voicePreset.windowsHidCode(mode, k1.getHidCode());
+                if (normalizedHid != k1.getHidCode()) {
+                    k1.setHidCode(normalizedHid);
+                    migratedVoiceConfiguration = true;
                 }
             }
         }
@@ -398,6 +416,10 @@ public class StudioState {
         revision.set(draft.revision);
         dirtyParts.clear();
         dirtyCount.set(0);
+        if (migratedVoiceConfiguration) {
+            markDirty(StudioPart.KEY1);
+            syncStatus.set("已迁移旧版 Key1 语音配置，请保存配置后写入键盘。");
+        }
     }
 
     public PersistedDraft toPersisted() {
@@ -463,4 +485,3 @@ public class StudioState {
         }
     }
 }
-

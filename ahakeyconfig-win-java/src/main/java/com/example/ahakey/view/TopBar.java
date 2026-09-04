@@ -4,6 +4,8 @@ import com.example.ahakey.app.StudioController;
 import com.example.ahakey.model.DeviceStatus;
 import com.example.ahakey.model.StudioState;
 import com.example.ahakey.service.AgentManager;
+import com.example.ahakey.service.CodexHookConfig;
+import com.example.ahakey.service.HookEndpoint;
 import com.example.ahakey.service.VoiceInputManager;
 import com.example.ahakey.util.Icons;
 import javafx.application.Platform;
@@ -40,6 +42,8 @@ import javafx.animation.AnimationTimer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import java.util.ArrayList;
+import java.util.List;
 
 public class TopBar extends VBox {
     private final StudioController controller;
@@ -693,6 +697,39 @@ public class TopBar extends VBox {
 
         deviceCard.getChildren().addAll(deviceTitle, deviceRow1, deviceRow2);
 
+        VBox hookRuntimeCard = new VBox(8);
+        hookRuntimeCard.getStyleClass().add("dialog-card");
+        hookRuntimeCard.setPadding(new Insets(12));
+        Label hookRuntimeTitle = new Label("Hook 运行状态");
+        hookRuntimeTitle.getStyleClass().add("dialog-card-title");
+        Label hookEndpoint = new Label();
+        hookEndpoint.getStyleClass().add("dialog-text");
+        Label hookObservation = new Label();
+        hookObservation.getStyleClass().add("dialog-text");
+        hookObservation.setWrapText(true);
+        Label hookBoundary = new Label(
+            "“已安装”只表示配置存在；只有“最近事件”出现后，才证明当前 Codex 事件真正到达 Studio。"
+        );
+        hookBoundary.getStyleClass().add("status-detail");
+        hookBoundary.setWrapText(true);
+        Button refreshHookRuntime = new Button("刷新运行状态");
+        Runnable updateHookRuntime = () -> {
+            int actualPort = controller.getHookDispatchPort();
+            hookEndpoint.setText(controller.isHookDispatchRunning() && actualPort > 0
+                ? "当前 endpoint: " + HookEndpoint.LOOPBACK_HOST + ":" + actualPort
+                : "当前 endpoint: 未运行");
+            hookObservation.setText(controller.getHookObservationSummary());
+        };
+        refreshHookRuntime.setOnAction(event -> updateHookRuntime.run());
+        updateHookRuntime.run();
+        hookRuntimeCard.getChildren().addAll(
+            hookRuntimeTitle,
+            hookEndpoint,
+            hookObservation,
+            hookBoundary,
+            refreshHookRuntime
+        );
+
         // 日志区域（提前创建以记录检测过程）
         logArea = new TextArea();
         logArea.getStyleClass().add("dialog-log-area");
@@ -791,7 +828,16 @@ public class TopBar extends VBox {
         actionButtons.getChildren().addAll(connectBtn, disconnectBtn, clearLogBtn, closeBtn);
         actionButtons.setAlignment(Pos.CENTER_RIGHT);
 
-        content.getChildren().addAll(deviceCard, claudeCard, cursorCard, codexCard, kimiCard, logCard, actionButtons);
+        content.getChildren().addAll(
+            deviceCard,
+            hookRuntimeCard,
+            claudeCard,
+            cursorCard,
+            codexCard,
+            kimiCard,
+            logCard,
+            actionButtons
+        );
         scrollPane.setContent(content);
 
         Scene scene = new Scene(scrollPane);
@@ -853,7 +899,6 @@ public class TopBar extends VBox {
     // ==================== Hook 管理（与 Python 版完全对齐） ====================
 
     private static final ObjectMapper HOOK_MAPPER = new ObjectMapper();
-    private static final int HOOK_DISPATCH_PORT = 8765;
     private static final String CODEX_SIDECAR_NAME = ".ahakey_codex_hooks_v1";
     private static final String CODEX_HOOK_BLOCK_START = "# BEGIN AhaKey Codex Hooks";
     private static final String CODEX_HOOK_BLOCK_END = "# END AhaKey Codex Hooks";
@@ -873,9 +918,12 @@ public class TopBar extends VBox {
     };
     // Codex: 6 个事件（与 Python CODEX_HOOK_EVENTS 完全一致）
     private static final String[][] CODEX_EVENTS = {
-        {"SessionStart", "CodexSessionStart", "10"}, {"PostToolUse", "CodexPostToolUse", "10"},
-        {"PreToolUse", "CodexPreToolUse", "20"}, {"PermissionRequest", "CodexPermissionRequest", "20"},
-        {"UserPromptSubmit", "CodexUserPromptSubmit", "10"}, {"Stop", "CodexStop", "10"}
+        {"SessionStart", "CodexSessionStart", "10", "AhaKey Studio: 更新会话启动灯效"},
+        {"PostToolUse", "CodexPostToolUse", "10", "AhaKey Studio: 更新工具完成灯效"},
+        {"PreToolUse", "CodexPreToolUse", "20", "AhaKey Studio: 更新工具运行灯效"},
+        {"PermissionRequest", "CodexPermissionRequest", "20", "AhaKey Studio: 检查硬件审批拨杆"},
+        {"UserPromptSubmit", "CodexUserPromptSubmit", "10", "AhaKey Studio: 更新提问灯效"},
+        {"Stop", "CodexStop", "10", "AhaKey Studio: 更新任务停止灯效"}
     };
     // Kimi: 7 个事件（与 Python kimi_hooks.KIMI_HOOK_ENTRIES 完全一致）
     private static final String[][] KIMI_EVENTS = {
@@ -885,11 +933,8 @@ public class TopBar extends VBox {
         {"Stop", "KimiStop", "10"}
     };
 
-    private static final String HOOK_SCRIPT_NAME = "ahakey-hook.ps1";
-
     private Path getHookScriptPath() {
-        String home = System.getProperty("user.home");
-        return Paths.get(home, ".ahakey", "hooks", HOOK_SCRIPT_NAME);
+        return HookEndpoint.scriptPath();
     }
 
     private String buildHookCommand(String agentEvent) {
@@ -903,58 +948,8 @@ public class TopBar extends VBox {
      * 该脚本接收事件名参数，通过 TCP 发送到 Java HookDispatchServer，后者映射为 BLE 状态码。
      */
     private void generateHookScript() {
-        Path scriptPath = getHookScriptPath();
         try {
-            java.nio.file.Files.createDirectories(scriptPath.getParent());
-            String content =
-                "# AhaKey Hook Dispatcher - Auto-generated, do not edit\n" +
-                "# Receives hook event name as argument, dispatches to AhaKey Studio via TCP.\n" +
-                "# Compatible with Claude Code, Codex, Kimi, and Cursor hooks.\n" +
-                "param([Parameter(Position=0)][string]$EventName)\n" +
-                "try {\n" +
-                "    if ([Console]::IsInputRedirected) { $null = [Console]::In.ReadToEnd() }\n" +
-                "} catch { }\n" +
-                "try {\n" +
-                "    $tcp = New-Object System.Net.Sockets.TcpClient\n" +
-                "    $tcp.Connect('127.0.0.1', " + HOOK_DISPATCH_PORT + ")\n" +
-                "    $writer = New-Object System.IO.StreamWriter($tcp.GetStream())\n" +
-                "    $writer.WriteLine($EventName)\n" +
-                "    $writer.Flush()\n" +
-                "    $reader = New-Object System.IO.StreamReader($tcp.GetStream())\n" +
-                "    $response = $reader.ReadLine()\n" +
-                "    $tcp.Close()\n" +
-                "} catch {\n" +
-                "    $response = $null\n" +
-                "}\n" +
-                "# Codex lifecycle hooks must output exactly {} (Codex validates JSON schema)\n" +
-                "if ($EventName -match '^Codex' -and $EventName -ne 'CodexPermissionRequest') {\n" +
-                "    [Console]::WriteLine('{}')\n" +
-                "    exit 0\n" +
-                "}\n" +
-                "# Codex PermissionRequest: output hookSpecificOutput in Codex format\n" +
-                "if ($EventName -eq 'CodexPermissionRequest') {\n" +
-                "    $isAuto = $response -match '\"autoApproved\"\\s*:\\s*true'\n" +
-                "    if ($isAuto) {\n" +
-                "        [Console]::WriteLine('{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}')\n" +
-                "    } else {\n" +
-                "        [Console]::WriteLine('{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\"}}')\n" +
-                "    }\n" +
-                "    exit 0\n" +
-                "}\n" +
-                "# Claude PermissionRequest: output hookSpecificOutput in Claude format\n" +
-                "if ($EventName -eq 'PermissionRequest') {\n" +
-                "    $isAuto = $response -match '\"autoApproved\"\\s*:\\s*true'\n" +
-                "    if ($isAuto) {\n" +
-                "        [Console]::WriteLine('{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}')\n" +
-                "    } else {\n" +
-                "        [Console]::WriteLine('{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"ask\"}}}')\n" +
-                "    }\n" +
-                "    exit 0\n" +
-                "}\n" +
-                "# Kimi / Cursor: pass through server response\n" +
-                "if ($response) { [Console]::WriteLine($response) } else { [Console]::WriteLine('{\"ok\":true}') }\n" +
-                "exit 0\n";
-            java.nio.file.Files.write(scriptPath, content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            Path scriptPath = HookEndpoint.installPowerShellScript();
             addLog("[安装] 生成分发脚本: " + scriptPath);
         } catch (Exception e) {
             addLog("[警告] 生成分发脚本失败: " + e.getMessage());
@@ -1003,8 +998,16 @@ public class TopBar extends VBox {
     }
 
     private boolean checkCodexHookInstalled() {
-        String home = System.getProperty("user.home");
-        return Paths.get(home, ".codex", CODEX_SIDECAR_NAME).toFile().exists();
+        Path hooksJson = getHookConfigPath("Codex");
+        if (!hooksJson.toFile().exists()) {
+            return false;
+        }
+        try {
+            return CodexHookConfig.containsManagedHandler(CodexHookConfig.read(hooksJson));
+        } catch (Exception e) {
+            addLog("[错误] 读取 Codex Hook 配置: " + e.getMessage());
+            return false;
+        }
     }
 
     private boolean checkKimiHookInstalled(Path path) {
@@ -1127,34 +1130,16 @@ public class TopBar extends VBox {
         try {
             java.nio.file.Files.createDirectories(hooksJson.getParent());
             backupFile(hooksJson);
-            // 构建 hooks.json（与 Python build_codex_hooks_json 完全一致）
-            ObjectNode hooks = HOOK_MAPPER.createObjectNode();
-            for (String[] ev : CODEX_EVENTS) {
-                ObjectNode cmd = HOOK_MAPPER.createObjectNode();
-                cmd.put("type", "command");
-                cmd.put("command", buildHookCommand(ev[1]));
-                cmd.put("timeout", Integer.parseInt(ev[2]));
-                ArrayNode innerArr = HOOK_MAPPER.createArrayNode();
-                innerArr.add(cmd);
-                ObjectNode entry = HOOK_MAPPER.createObjectNode();
-                if ("SessionStart".equals(ev[0])) {
-                    entry.put("matcher", "startup|resume|clear");
-                } else if ("UserPromptSubmit".equals(ev[0]) || "Stop".equals(ev[0])) {
-                    // no matcher
-                } else {
-                    entry.put("matcher", "*");
-                }
-                entry.set("hooks", innerArr);
-                ArrayNode outerArr = HOOK_MAPPER.createArrayNode();
-                outerArr.add(entry);
-                hooks.set(ev[0], outerArr);
-            }
-            ObjectNode root = HOOK_MAPPER.createObjectNode();
-            root.set("hooks", hooks);
-            HOOK_MAPPER.writerWithDefaultPrettyPrinter().writeValue(hooksJson.toFile(), root);
-            addLog("[成功] 已写入 " + hooksJson);
+            ObjectNode existing = CodexHookConfig.read(hooksJson);
+            ObjectNode merged = CodexHookConfig.install(existing, buildCodexHookDefinitions());
+            CodexHookConfig.write(hooksJson, merged);
+            addLog("[成功] 已合并写入 " + hooksJson + "（保留其他 Hook）");
             // 写入 sidecar 管理标记
-            java.nio.file.Files.write(sidecar, java.time.LocalDateTime.now().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            java.nio.file.Files.write(
+                sidecar,
+                ("AhaKey Studio Codex hooks v2\n" + java.time.LocalDateTime.now())
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8)
+            );
             // 更新 config.toml：确保 [features] hooks = true
             backupFile(configToml);
             String toml = configToml.toFile().exists()
@@ -1168,6 +1153,7 @@ public class TopBar extends VBox {
             java.nio.file.Files.write(configToml, toml.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             addLog("[成功] 已更新 " + configToml + "（[features].hooks = true）");
             addLog("[成功] 已注册 " + CODEX_EVENTS.length + " 个 Codex hook 事件");
+            addLog("[提示] Hook 定义已变化；请在 Codex /hooks 中审核并信任 AhaKey Studio。");
         } catch (Exception e) { addLog("[错误] Codex 安装失败: " + e.getMessage()); }
     }
 
@@ -1177,12 +1163,15 @@ public class TopBar extends VBox {
         Path configToml = Paths.get(home, ".codex", "config.toml");
         Path sidecar = Paths.get(home, ".codex", CODEX_SIDECAR_NAME);
         try {
+            if (hooksJson.toFile().exists()) {
+                backupFile(hooksJson);
+                ObjectNode existing = CodexHookConfig.read(hooksJson);
+                ObjectNode cleaned = CodexHookConfig.remove(existing);
+                CodexHookConfig.write(hooksJson, cleaned);
+                addLog("[成功] 已从 hooks.json 精确移除 AhaKey handlers，其他 Hook 保持不变");
+            }
             if (sidecar.toFile().exists()) {
                 java.nio.file.Files.delete(sidecar);
-                if (hooksJson.toFile().exists()) {
-                    java.nio.file.Files.delete(hooksJson);
-                    addLog("[成功] 已删除 " + hooksJson + "（由 AhaKey 安装器写入）");
-                }
             }
             if (configToml.toFile().exists()) {
                 String toml = new String(java.nio.file.Files.readAllBytes(configToml), java.nio.charset.StandardCharsets.UTF_8);
@@ -1194,6 +1183,28 @@ public class TopBar extends VBox {
             }
             addLog("[成功] Codex Hook 卸载完成");
         } catch (Exception e) { addLog("[错误] Codex 卸载失败: " + e.getMessage()); }
+    }
+
+    private List<CodexHookConfig.Definition> buildCodexHookDefinitions() {
+        List<CodexHookConfig.Definition> definitions = new ArrayList<>();
+        for (String[] event : CODEX_EVENTS) {
+            String matcher;
+            if ("SessionStart".equals(event[0])) {
+                matcher = "startup|resume|clear";
+            } else if ("UserPromptSubmit".equals(event[0]) || "Stop".equals(event[0])) {
+                matcher = null;
+            } else {
+                matcher = "*";
+            }
+            definitions.add(new CodexHookConfig.Definition(
+                event[0],
+                matcher,
+                buildHookCommand(event[1]),
+                Integer.parseInt(event[2]),
+                event[3]
+            ));
+        }
+        return definitions;
     }
 
     // ---- Kimi: ~/.kimi/config.toml（7 个事件，TOML [[hooks]] 块） ----

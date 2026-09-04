@@ -10,6 +10,7 @@ import com.example.ahakey.model.ModeSlot;
 import com.example.ahakey.model.OledModeDraft;
 import com.example.ahakey.model.StudioPart;
 import com.example.ahakey.model.StudioState;
+import com.example.ahakey.model.VoicePreset;
 import javafx.scene.control.Spinner;
 import javafx.stage.Window;
 import com.example.ahakey.service.AgentManager;
@@ -103,11 +104,7 @@ public class InspectorPane extends ScrollPane {
         ));
 
         if (part == StudioPart.KEY1) {
-            // KEY1 始终使用自定义快捷键模式
-            KeyConfig key1 = studioState.getKeyConfig(StudioPart.KEY1);
-            if (key1.getVoicePreset() != com.example.ahakey.model.VoicePreset.CUSTOM) {
-                key1.setVoicePreset(com.example.ahakey.model.VoicePreset.CUSTOM);
-            }
+            body.getChildren().add(createVoicePresetGroup());
             body.getChildren().add(createKeyBindingGroup(part));
             body.getChildren().add(createSimulateKeyGroup(part));
             body.getChildren().add(createDescriptionGroup(part));
@@ -123,15 +120,56 @@ public class InspectorPane extends ScrollPane {
         }
     }
 
+    private VBox createVoicePresetGroup() {
+        return createGroupBox("语音输入方式", () -> {
+            VBox box = new VBox(10);
+            ModeSlot mode = studioState.getSelectedMode();
+            KeyConfig key = studioState.getKeyConfig(mode, StudioPart.KEY1);
+
+            ComboBox<VoicePreset> presets = new ComboBox<>();
+            presets.getItems().addAll(VoicePreset.windowsOptions());
+            if (!presets.getItems().contains(key.getVoicePreset())) {
+                presets.getItems().add(key.getVoicePreset());
+            }
+            presets.setMaxWidth(Double.MAX_VALUE);
+            presets.setValue(key.getVoicePreset());
+            presets.valueProperty().addListener((obs, oldValue, newValue) -> {
+                if (newValue == null || newValue == key.getVoicePreset()) {
+                    return;
+                }
+                controller.applyVoicePreset(newValue);
+                rebuild();
+            });
+
+            Label detail = new Label(key.getVoicePreset().getDetail());
+            detail.getStyleClass().add("warning-note");
+            detail.setWrapText(true);
+
+            Label focusNote = new Label(
+                mode.getTitle() + " 是键盘和灯效配置，不是窗口目标。"
+                    + "无论选择哪种语音方式，文字都进入当前有光标的文本框；"
+                    + "Studio 不会自动切换或聚焦 Codex 对话。"
+            );
+            focusNote.getStyleClass().add("warning-note");
+            focusNote.setWrapText(true);
+
+            box.getChildren().addAll(presets, detail, focusNote);
+            return box;
+        });
+    }
+
     private VBox createSimulateKeyGroup(StudioPart part) {
         return createGroupBox("模拟按键", () -> {
             VBox box = new VBox(8);
             KeyConfig key = studioState.getKeyConfig(part);
             var voice = controller.getVoiceRelay();
 
-            Button simulate = new Button("模拟按一次 Key1");
+            Button simulate = new Button("测试当前语音方式");
             simulate.getStyleClass().add("button-prominent");
-            simulate.setOnAction(e -> voice.simulateKeyByHid(key.getHidCode()));
+            simulate.setOnAction(e -> voice.simulateVoiceKeyTap(
+                studioState.getSelectedMode(),
+                key.getVoicePreset()
+            ));
 
             Label hint = new Label();
             hint.textProperty().bind(voice.lastSimulateHintProperty());
@@ -179,7 +217,9 @@ public class InspectorPane extends ScrollPane {
             } else {
                 Label presetLabel = new Label("当前为语音预设模式");
                 presetLabel.getStyleClass().add("key-preview-label");
-                Label lockNote = new Label("语音预设会固定 F17/F18 触发键；改为「自定义快捷键」后可编辑 HID。");
+                Label lockNote = new Label(
+                    "语音预设会固定对应的硬件快捷键；改为「自定义快捷键」后可编辑 HID。"
+                );
                 lockNote.getStyleClass().add("warning-note");
                 lockNote.setWrapText(true);
                 box.getChildren().addAll(presetLabel, lockNote);
@@ -978,4 +1018,3 @@ public class InspectorPane extends ScrollPane {
     }
 
 }
-

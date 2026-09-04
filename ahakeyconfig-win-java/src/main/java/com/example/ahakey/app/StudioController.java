@@ -129,6 +129,18 @@ public class StudioController {
         return voiceRelay;
     }
 
+    public boolean isHookDispatchRunning() {
+        return hookDispatchServer.isRunning();
+    }
+
+    public int getHookDispatchPort() {
+        return hookDispatchServer.getActualPort();
+    }
+
+    public String getHookObservationSummary() {
+        return hookDispatchServer.getObservationSummary();
+    }
+
     public DeviceStatus getDeviceStatus() {
         return deviceStatus;
     }
@@ -621,14 +633,10 @@ public class StudioController {
         var key = studioState.getKeyConfig(StudioPart.KEY1);
         key.setVoicePreset(preset);
         if (preset.locksShortcut()) {
-            if (preset == VoicePreset.MACOS_NATIVE) {
-                // macOS 原生语音始终使用 F18
-                key.setHidCode(com.example.ahakey.model.HIDUsage.F18);
-            } else if (studioState.getSelectedMode() == ModeSlot.MODE1) {
-                key.setHidCode(com.example.ahakey.model.HIDUsage.F17);
-            } else {
-                key.setHidCode(com.example.ahakey.model.HIDUsage.F18);
-            }
+            key.setHidCode(preset.windowsHidCode(
+                studioState.getSelectedMode(),
+                key.getHidCode()
+            ));
         }
         studioState.markDirty(StudioPart.KEY1);
         refreshVoiceRoutes();
