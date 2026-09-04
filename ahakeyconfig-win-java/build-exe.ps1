@@ -39,18 +39,22 @@ Write-Status "Maven build successful" Green
 # Clean old installer
 if (Test-Path $InstallerDir) {
     Write-Status "Removing old installer..." Yellow
-    # Try to kill any running processes that might be locking the directory
-    try {
-        Get-Process -Name "AhaKeyStudio" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 500
-    } catch {
-        # Ignore errors
+    $runningProcesses = @(Get-Process -Name "AhaKeyStudio" -ErrorAction SilentlyContinue)
+    if ($runningProcesses.Count -gt 0) {
+        $runningPids = ($runningProcesses | ForEach-Object Id) -join ", "
+        Write-Status "ERROR: AhaKey Studio is running (PID $runningPids). Exit it before rebuilding." Red
+        exit 1
     }
+
     # Use robocopy to delete directory (more reliable)
     $null = New-Item -ItemType Directory -Path "$TargetDir/empty_dir" -Force -ErrorAction SilentlyContinue
     robocopy "$TargetDir/empty_dir" $InstallerDir /MIR /NFL /NDL /NJH /NJS | Out-Null
     Remove-Item -Path "$TargetDir/empty_dir" -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $InstallerDir -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path $InstallerDir) {
+        Write-Status "ERROR: Could not remove the previous app image: $InstallerDir" Red
+        exit 1
+    }
 }
 
 # Create clean temporary input directory
