@@ -6,16 +6,24 @@
 
     <groupId>com.example</groupId>
     <artifactId>ahakey-studio</artifactId>
-    <version>1.0.2</version>
+    <version>1.1.2</version>
     <packaging>jar</packaging>
 
     <properties>
         <java.version>17</java.version>
         <javafx.version>17.0.10</javafx.version>
+        <sherpa.onnx.version>v1.13.7</sherpa.onnx.version>
         <maven.compiler.source>${java.version}</maven.compiler.source>
         <maven.compiler.target>${java.version}</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
+
+    <repositories>
+        <repository>
+            <id>jitpack.io</id>
+            <url>https://jitpack.io</url>
+        </repository>
+    </repositories>
 
     <dependencies>
         <!-- JavaFX -->
@@ -71,11 +79,16 @@
             <version>1.4.11</version>
         </dependency>
 
-        <!-- ONNX Runtime for SenseVoice-Small -->
+        <!-- Official sherpa-onnx Java API plus Windows x64 native runtime. -->
         <dependency>
-            <groupId>com.microsoft.onnxruntime</groupId>
-            <artifactId>onnxruntime</artifactId>
-            <version>1.16.3</version>
+            <groupId>com.github.k2-fsa.sherpa-onnx</groupId>
+            <artifactId>sherpa-onnx-jvm</artifactId>
+            <version>${sherpa.onnx.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.github.k2-fsa.sherpa-onnx</groupId>
+            <artifactId>sherpa-onnx-native-lib-win-x64</artifactId>
+            <version>${sherpa.onnx.version}</version>
         </dependency>
 
         <dependency>

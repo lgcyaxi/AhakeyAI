@@ -2,16 +2,25 @@
 AhaKey Studio Build Script - Package JavaFX app to Windows EXE Installer
 Requires: JDK 17+, Maven 3.6+, NSIS (for --type exe)
 
-Usage: .\build-installer.ps1
+Usage:
+  .\build-installer.ps1
+  .\build-installer.ps1 -IncludeLocalModel
+  .\build-installer.ps1 -IncludeLocalModel -LocalModelDirectory <extracted-model-dir>
 #>
+
+param(
+    [switch]$IncludeLocalModel,
+    [string]$LocalModelDirectory
+)
 
 $ErrorActionPreference = "Stop"
 
 $ProjectName = "AhaKeyStudio"
-$Version = "1.0.2"
+$Version = "1.1.1"
 $MainClass = "com.example.ahakey.App"
 $TargetDir = Join-Path $PSScriptRoot "target"
 $MavenRepo = Join-Path $TargetDir ".m2repo"
+$DependencyDir = Join-Path $TargetDir "lib"
 $InstallerDir = "$TargetDir\installer"
 $TempDir = "$TargetDir\jpackage-input"
 $RuntimeDir = "$TargetDir\runtime"
@@ -21,6 +30,13 @@ $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BleProjectRoot = Join-Path $RepositoryRoot "BLE_tcp_bridge"
 $BleProject = Join-Path $BleProjectRoot "BLE_tcp_driver.csproj"
 $BleOutputDir = Join-Path $BleProjectRoot "bin\Release"
+$DefaultLocalModelDirectory = Join-Path $TargetDir "model-cache\sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
+$ExpectedModelSha256 = "C71F0CE00BEC95B07744E116345E33D8CBBE08CEF896382CF907BF4B51A2CD51"
+$ExpectedTokensSha256 = "F449EB28DC567533D7FA59BE34E2ABCA8784F771850C78A47FB731A31429A1DC"
+$modelEnabled = $IncludeLocalModel -or $PSBoundParameters.ContainsKey("LocalModelDirectory")
+if ([string]::IsNullOrWhiteSpace($LocalModelDirectory)) {
+    $LocalModelDirectory = $DefaultLocalModelDirectory
+}
 
 function Write-Status($Message, $Color) {
     Write-Host "[$(Get-Date -Format HH:mm:ss)] " -NoNewline
@@ -63,8 +79,47 @@ function Get-RunningProcessesUnderPath {
     )
 }
 
+function Resolve-LocalModelAssets {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+
+    $resolvedDirectory = (Resolve-Path -LiteralPath $Directory -ErrorAction Stop).Path
+    $model = Join-Path $resolvedDirectory "model.int8.onnx"
+    $tokens = Join-Path $resolvedDirectory "tokens.txt"
+    $notice = Join-Path $PSScriptRoot "THIRD_PARTY_NOTICES.md"
+    $apacheLicense = Join-Path $RepositoryRoot "LICENSE"
+    foreach ($required in $model, $tokens, $notice, $apacheLicense) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "Required local-model asset not found: $required"
+        }
+    }
+
+    $modelHash = (Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash
+    $tokensHash = (Get-FileHash -LiteralPath $tokens -Algorithm SHA256).Hash
+    if ($modelHash -ne $ExpectedModelSha256) {
+        throw "Unexpected SenseVoice model SHA-256: $modelHash"
+    }
+    if ($tokensHash -ne $ExpectedTokensSha256) {
+        throw "Unexpected SenseVoice tokens SHA-256: $tokensHash"
+    }
+
+    [pscustomobject]@{
+        Model = $model
+        Tokens = $tokens
+        Notice = $notice
+        ApacheLicense = $apacheLicense
+    }
+}
+
 Write-Status "AhaKey Studio Installer Build v$Version" Cyan
 Write-Status "====================================" Cyan
+
+$localModelAssets = $null
+if ($modelEnabled) {
+    $localModelAssets = Resolve-LocalModelAssets -Directory $LocalModelDirectory
+    Write-Status "Full local-model installer enabled: $LocalModelDirectory" Cyan
+} else {
+    Write-Status "Engine included; model weights are optional and available from Settings" Yellow
+}
 
 if (-not (Test-Path -LiteralPath $BleProject)) {
     throw "Required sibling BLE bridge project not found: $BleProject"
@@ -99,6 +154,9 @@ foreach ($p in $wixPaths) {
 # Build project (must run from script directory so Maven finds pom.xml)
 Set-Location $PSScriptRoot
 Write-Status "Building project..." Cyan
+if (Test-Path -LiteralPath $DependencyDir) {
+    Remove-Item -LiteralPath $DependencyDir -Recurse -Force
+}
 & mvn "-Dmaven.repo.local=$MavenRepo" package
 
 if ($LASTEXITCODE -ne 0) {
@@ -144,44 +202,36 @@ Copy-Item -Path $IconPath -Destination "$ResourceDir\$ProjectName.ico" -Force
 
 $jarPath = "$TargetDir\ahakey-studio-$Version.jar"
 
-# Check if local model is enabled
-$modelEnabled = $false
-$propsFile = Join-Path $PSScriptRoot "src/main/resources/model_config.properties"
-if (Test-Path $propsFile) {
-    $match = Select-String -Path $propsFile -Pattern '^\s*model\.enabled\s*=\s*(.+)$'
-    if ($match) {
-        $modelEnabled = $match.Matches[0].Groups[1].Value.Trim() -eq 'true'
-    }
-}
-
-if ($modelEnabled) {
-    Write-Status "model.enabled=true: Including model files and ONNX runtime" Cyan
-} else {
-    Write-Status "model.enabled=false: EXCLUDING model files and ONNX runtime" Yellow
-}
-
 # Copy only required files
 Copy-Item -Path $jarPath -Destination $TempDir
 Copy-Item -Path "$TargetDir\lib\*.jar" -Destination "$TempDir\lib"
 
+New-Item -ItemType Directory -Force -Path (Join-Path $TempDir "licenses") | Out-Null
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "THIRD_PARTY_NOTICES.md") -Destination $TempDir -Force
+Copy-Item -LiteralPath (Join-Path $RepositoryRoot "LICENSE") -Destination (Join-Path $TempDir "licenses\sherpa-onnx-Apache-2.0.txt") -Force
 if ($modelEnabled) {
-    Write-Status "Copying SenseVoice model files..." Cyan
+    Write-Status "Copying validated SenseVoice and license files..." Cyan
     New-Item -ItemType Directory -Path "$TempDir\models" | Out-Null
-    Copy-Item -Path (Join-Path $PSScriptRoot "src/main/resources/models/model_q8.onnx") -Destination "$TempDir\models" -Force
-    Copy-Item -Path (Join-Path $PSScriptRoot "src/main/resources/models/tokens.txt") -Destination "$TempDir\models" -Force
-    Write-Status "Model files copied successfully" Green
+    New-Item -ItemType Directory -Force -Path "$TempDir\licenses" | Out-Null
+    Copy-Item -LiteralPath $localModelAssets.Model -Destination "$TempDir\models\model.int8.onnx" -Force
+    Copy-Item -LiteralPath $localModelAssets.Tokens -Destination "$TempDir\models\tokens.txt" -Force
+    Copy-Item -LiteralPath $localModelAssets.Notice -Destination "$TempDir\THIRD_PARTY_NOTICES.md" -Force
+    Copy-Item -LiteralPath $localModelAssets.ApacheLicense -Destination "$TempDir\licenses\sherpa-onnx-Apache-2.0.txt" -Force
+    @(
+        "model.enabled=true"
+        "model.path=models/model.int8.onnx"
+        "tokens.path=models/tokens.txt"
+        "model.type=SenseVoice INT8 2024-07-17"
+        "num_threads=1"
+        "sample_rate=16000"
+        "language=zh"
+        "text_norm=true"
+    ) | Set-Content -LiteralPath "$TempDir\model_config.properties" -Encoding ascii
+    Write-Status "Validated local model and runtime configuration copied" Green
 } else {
-    Write-Status "Removing onnxruntime from lib..." Yellow
-    Remove-Item -Path "$TempDir\lib\onnxruntime*.jar" -Force -ErrorAction SilentlyContinue
-    Write-Status "Removing model files from JAR..." Yellow
-    $jarName = Split-Path $jarPath -Leaf
-    $zipPath = "$TempDir\$jarName"
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $zip = [System.IO.Compression.ZipFile]::Open($zipPath, 'Update')
-    $entries = $zip.Entries | Where-Object { $_.FullName -like 'models/*' }
-    foreach ($entry in $entries) { $entry.Delete() }
-    $zip.Dispose()
-    Write-Status "onnxruntime + model files removed from package (saved ~233MB)" Green
+    Write-Status "Bundling speech engine without model weights..." Yellow
+
+    Write-Status "Speech engine included; model weights not bundled" Green
 }
 
 Write-Status "Input directory ready" Green
@@ -209,8 +259,20 @@ $javaVersion = (& java -version 2>&1 | Select-String 'version "(\d+)' | ForEach-
 $compressArg = if ([int]$javaVersion -ge 21) { "zip-6" } else { "2" }
 Write-Status "JDK $javaVersion detected, using --compress=$compressArg" Cyan
 
+# jlink only needs the modular JavaFX JARs. Pointing it at every runtime JAR
+# makes it try to derive module names for classpath-only dependencies; the
+# pinned sherpa filename contains v1.13.7 and is intentionally not a module.
+$javaFxModuleJars = @(
+    Get-ChildItem -LiteralPath "$TempDir/lib" -Filter "javafx-*-win.jar" -File
+)
+if ($javaFxModuleJars.Count -ne 4) {
+    $found = ($javaFxModuleJars | ForEach-Object Name) -join ", "
+    throw "Expected four Windows JavaFX module JARs for jlink; found: $found"
+}
+$javaFxModulePath = ($javaFxModuleJars.FullName -join [IO.Path]::PathSeparator)
+
 $jlinkArgs = @(
-    "--module-path", "$TargetDir\lib",
+    "--module-path", $javaFxModulePath,
     "--add-modules", "javafx.controls,javafx.fxml,javafx.graphics,java.base,java.logging,java.desktop,java.net.http,java.sql,java.naming,java.xml",
     "--output", $RuntimeDir,
     "--strip-debug",

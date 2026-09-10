@@ -2,7 +2,6 @@
     -fx-background-color: linear-gradient(to bottom, #fafafc, #f3f4f8);
     -fx-font-family: "Segoe UI", Roboto, "Helvetica Neue", -apple-system, BlinkMacSystemFont, sans-serif;
 }
-
 .workspace {
     -fx-spacing: 0;
 }
@@ -245,14 +244,14 @@
     -fx-background-radius: 22px;
     -fx-border-width: 1px;
     -fx-border-color: #e5e9f0;
-    -fx-padding: 24px 28px;
+    -fx-padding: 12px;
     -fx-effect: dropshadow(gaussian, rgba(15, 23, 42, 0.08), 24, 0.22, 0, 6);
 }
 
 .keyboard-stage {
     -fx-background-color: radial-gradient(center 50% 20%, radius 90%, #fcfdff, #eef2f7);
     -fx-background-radius: 18px;
-    -fx-padding: 24px;
+    -fx-padding: 12px;
 }
 
 .device-hotspot {
@@ -260,8 +259,8 @@
     -fx-background-radius: 18px;
     -fx-border-radius: 18px;
     -fx-border-color: #e3e8ef;
-    -fx-border-width: 1px;
-    -fx-padding: 16px;
+    -fx-border-width: 2px;
+    -fx-padding: 8px;
     -fx-cursor: hand;
 }
 
@@ -293,16 +292,16 @@
 }
 
 .light-bar-card {
-    -fx-pref-width: 100%;
-    -fx-min-width: 160px;
-    -fx-max-width: 520px;
-    -fx-padding: 20px 28px;
+    -fx-min-width: 0;
+    -fx-padding: 10px;
+    -fx-border-width: 2px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 10px;
+    -fx-cursor: hand;
 }
 
 .keys-container {
-    -fx-pref-width: 100%;
-    -fx-min-width: 160px;
-    -fx-max-width: 520px;
+    -fx-min-width: 0;
 }
 
 .light-bar-track {
@@ -312,8 +311,8 @@
 }
 
 .light-segment {
-    -fx-min-width: 54px;
-    -fx-max-width: 54px;
+    -fx-min-width: 24px;
+    -fx-pref-width: 54px;
     -fx-min-height: 12px;
     -fx-max-height: 12px;
     -fx-background-radius: 6px;
@@ -395,7 +394,7 @@
 }
 
 .key-caption {
-    -fx-font-size: 11px;
+    -fx-font-size: 12px;
     -fx-font-weight: 700;
     -fx-text-fill: #6b7280;
 }
@@ -465,8 +464,7 @@
     -fx-background-color: rgba(255, 255, 255, 0.9);
     -fx-border-width: 0;
     -fx-pref-width: 560px;
-    -fx-min-width: 500px;
-    -fx-max-width: 720px;
+    -fx-min-width: 0;
 }
 
 .inspector-pane > .viewport {
@@ -693,6 +691,20 @@
     -fx-background-radius: 3px;
 }
 
+.voice-preview-row {
+    -fx-alignment: center-left;
+    -fx-background-color: rgba(234, 244, 255, 0.96);
+    -fx-border-color: #cfe2f7;
+    -fx-border-width: 1px 0 0 0;
+    -fx-padding: 7px 18px 8px 18px;
+}
+
+.voice-preview {
+    -fx-text-fill: #23466b;
+    -fx-font-size: 13px;
+    -fx-font-weight: 600;
+}
+
 /* 中间工作区 ScrollPane 透明融合 */
 .workspace {
     -fx-background-color: transparent;
@@ -792,3 +804,36 @@ BorderPane > .center .scroll-pane > .viewport {
     -fx-font-weight: bold;
     -fx-text-fill: white;
 }
+
+/* Transitional studio shell: aligned with the unified client's neutral/green system. */
+.root { -fx-background-color: #f5f6f3; -fx-font-family: "Microsoft YaHei"; -fx-font-size: 13px; -fx-accent: #176b58; -fx-focus-color: #176b58; }
+.top-bar { -fx-background-color: #ffffff; -fx-border-color: transparent transparent #dfe5df transparent; }
+.shell-brand { -fx-font-size: 18px; -fx-font-weight: bold; -fx-text-fill: #173d36; }
+.shell-muted { -fx-text-fill: #61716a; -fx-font-size: 12px; }
+.studio-rail { -fx-padding: 26 16; -fx-spacing: 9; -fx-background-color: #edf1ed; }
+.nav-caption { -fx-padding: 0 12 16 12; -fx-font-size: 11px; -fx-text-fill: #64766b; }
+.nav-button { -fx-alignment: center-left; -fx-padding: 13 14; -fx-background-radius: 9; -fx-background-color: transparent; -fx-text-fill: #455c50; -fx-font-weight: bold; -fx-cursor: hand; }
+.nav-button:hover { -fx-background-color: #e0e8e0; }
+.nav-button:selected { -fx-background-color: #173d36; -fx-text-fill: white; }
+.studio-page { -fx-padding: 28 32; -fx-spacing: 22; -fx-fill-width: true; }
+.page-title { -fx-font-size: 28px; -fx-font-weight: bold; -fx-text-fill: #1e2925; }
+.card-title { -fx-font-size: 17px; -fx-font-weight: bold; -fx-text-fill: #173d36; }
+.studio-card { -fx-background-color: white; -fx-background-radius: 14; -fx-border-radius: 14; -fx-border-color: #dfe6df; -fx-padding: 22; }
+.shell-primary { -fx-background-color: #176b58; -fx-text-fill: white; -fx-background-radius: 8; -fx-padding: 10 16; -fx-font-weight: bold; -fx-cursor: hand; }
+.shell-primary:hover { -fx-background-color: #115441; }
+.shell-secondary { -fx-background-color: #e9eee9; -fx-text-fill: #244c3d; -fx-background-radius: 8; -fx-padding: 10 15; -fx-cursor: hand; }
+.shell-secondary:hover { -fx-background-color: #dce6dd; }
+.button:focused, .toggle-button:focused, .combo-box:focused { -fx-border-color: #176b58; -fx-border-width: 2; -fx-border-radius: 8; }
+.transcript-preview { -fx-background-color: #f5f8f4; -fx-padding: 20; -fx-background-radius: 10; -fx-font-size: 18px; -fx-text-fill: #25392c; }
+.page-scroll, .page-scroll > .viewport { -fx-background: #f5f6f3; -fx-background-color: #f5f6f3; }
+.studio-card .text-field, .studio-card .combo-box { -fx-background-color: #f7f9f6; -fx-border-color: #ced9cf; -fx-border-radius: 7; -fx-background-radius: 7; -fx-padding: 8; }
+
+/* Keep selection/focus in the same geometry so a click never shifts a hit target. */
+.light-bar-card.selected-hotspot, .auxiliary-hotspot.selected-hotspot { -fx-border-color: #176b58; }
+.auxiliary-hotspot { -fx-padding: 2; -fx-border-width: 2; -fx-border-color: transparent; -fx-border-radius: 12; -fx-cursor: hand; }
+.device-hotspot:focused, .light-bar-card:focused, .auxiliary-hotspot:focused { -fx-border-color: #176b58; }
+.mode-toggle { -fx-border-width: 2; -fx-border-color: transparent; }
+.mode-toggle:selected, .mode-toggle:selected:hover { -fx-background-color: #173d36; -fx-text-fill: white; }
+.light-effect-row { -fx-spacing: 8; }
+.oled-screen-small .oled-title { -fx-font-size: 14px; }
+.oled-screen-small .oled-caption { -fx-font-size: 11px; }

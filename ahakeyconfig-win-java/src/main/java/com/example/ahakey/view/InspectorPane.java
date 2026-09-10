@@ -11,6 +11,8 @@ import com.example.ahakey.model.OledModeDraft;
 import com.example.ahakey.model.StudioPart;
 import com.example.ahakey.model.StudioState;
 import com.example.ahakey.model.VoicePreset;
+import com.example.ahakey.model.VoiceTriggerMode;
+import com.example.ahakey.platform.VoiceRelayPlatform;
 import javafx.scene.control.Spinner;
 import javafx.stage.Window;
 import com.example.ahakey.service.AgentManager;
@@ -20,7 +22,6 @@ import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
-import javafx.scene.control.ScrollPane;
 import javafx.scene.control.Separator;
 import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleButton;
@@ -39,35 +40,44 @@ import javafx.scene.text.Text;
 import java.util.List;
 import java.util.function.Supplier;
 
-public class InspectorPane extends ScrollPane {
+public class InspectorPane extends VBox {
     private final StudioController controller;
     private final DeviceStatus deviceStatus;
     private final StudioState studioState;
     private final AgentManager agentManager;
+    private final VoiceRelayPlatform voiceRelay;
     private final VBox content = new VBox(18);
     private final VBox header = new VBox(8);
     private final VBox body = new VBox(16);
 
     public InspectorPane(StudioController controller) {
+        this(controller, controller.getDeviceStatus(), controller.getStudioState(),
+            controller.getAgentManager(), controller.getVoiceRelay());
+    }
+
+    InspectorPane(StudioController controller, DeviceStatus deviceStatus, StudioState studioState,
+                  AgentManager agentManager, VoiceRelayPlatform voiceRelay) {
         this.controller = controller;
-        this.deviceStatus = controller.getDeviceStatus();
-        this.studioState = controller.getStudioState();
-        this.agentManager = controller.getAgentManager();
+        this.deviceStatus = deviceStatus;
+        this.studioState = studioState;
+        this.agentManager = agentManager;
+        this.voiceRelay = voiceRelay;
         init();
     }
 
     private void init() {
-        setFitToWidth(true);
-        setHbarPolicy(ScrollBarPolicy.NEVER);
-        setMinWidth(500);
+        setMinWidth(0);
         setPrefWidth(560);
-        setMaxWidth(720);
+        setMaxWidth(Double.MAX_VALUE);
         HBox.setHgrow(this, Priority.NEVER);
         getStyleClass().add("inspector-pane");
 
         content.setPadding(new Insets(24));
+        content.setMinWidth(0);
+        body.setMinWidth(0);
+        header.setMinWidth(0);
         content.getChildren().addAll(header, body);
-        setContent(content);
+        getChildren().add(content);
 
         studioState.selectedPartProperty().addListener((obs, oldValue, newValue) -> rebuild());
         studioState.selectedModeProperty().addListener((obs, oldValue, newValue) -> rebuild());
@@ -96,6 +106,7 @@ public class InspectorPane extends ScrollPane {
 
         Label subtitle = new Label(mode.getTitle() + " · " + mode.getGuidance());
         subtitle.getStyleClass().add("inspector-subtitle");
+        subtitle.setWrapText(true);
 
         header.getChildren().addAll(titleRow, subtitle);
         body.disableProperty().bind(Bindings.createBooleanBinding(
@@ -145,6 +156,26 @@ public class InspectorPane extends ScrollPane {
             detail.getStyleClass().add("warning-note");
             detail.setWrapText(true);
 
+            Label triggerLabel = new Label("按键触发方式");
+            triggerLabel.getStyleClass().add("field-label");
+            ComboBox<VoiceTriggerMode> triggers = new ComboBox<>();
+            triggers.getItems().addAll(VoiceTriggerMode.windowsOptions());
+            triggers.setMaxWidth(Double.MAX_VALUE);
+            triggers.setValue(key.getVoiceTriggerMode());
+            triggers.valueProperty().addListener((obs, oldValue, newValue) -> {
+                if (newValue == null || newValue == key.getVoiceTriggerMode()) {
+                    return;
+                }
+                controller.applyVoiceTriggerMode(newValue);
+                rebuild();
+            });
+
+            Label triggerDetail = new Label(
+                key.getVoiceTriggerMode().getDetail(key.getVoicePreset())
+            );
+            triggerDetail.getStyleClass().add("warning-note");
+            triggerDetail.setWrapText(true);
+
             Label focusNote = new Label(
                 mode.getTitle() + " 是键盘和灯效配置，不是窗口目标。"
                     + "无论选择哪种语音方式，文字都进入当前有光标的文本框；"
@@ -153,7 +184,18 @@ public class InspectorPane extends ScrollPane {
             focusNote.getStyleClass().add("warning-note");
             focusNote.setWrapText(true);
 
-            box.getChildren().addAll(presets, detail, focusNote);
+            box.getChildren().addAll(presets, detail);
+            if (key.getVoicePreset().isStudioManagedOnWindows()) {
+                box.getChildren().addAll(triggerLabel, triggers, triggerDetail);
+            } else {
+                Label directNote = new Label(
+                    "这个语音方式由键盘直接发送快捷键，按下/松开行为由目标输入法决定。"
+                );
+                directNote.getStyleClass().add("warning-note");
+                directNote.setWrapText(true);
+                box.getChildren().add(directNote);
+            }
+            box.getChildren().add(focusNote);
             return box;
         });
     }
@@ -162,14 +204,33 @@ public class InspectorPane extends ScrollPane {
         return createGroupBox("模拟按键", () -> {
             VBox box = new VBox(8);
             KeyConfig key = studioState.getKeyConfig(part);
-            var voice = controller.getVoiceRelay();
+            var voice = voiceRelay;
 
-            Button simulate = new Button("测试当前语音方式");
+            VoiceTriggerMode triggerMode = key.getVoiceTriggerMode();
+            boolean pressAndHold = key.getVoicePreset().isStudioManagedOnWindows()
+                && triggerMode == VoiceTriggerMode.PRESS_AND_HOLD;
+            Button simulate = new Button(
+                pressAndHold ? "按住测试，松开停止" : "测试当前语音方式"
+            );
             simulate.getStyleClass().add("button-prominent");
-            simulate.setOnAction(e -> voice.simulateVoiceKeyTap(
-                studioState.getSelectedMode(),
-                key.getVoicePreset()
-            ));
+            if (pressAndHold) {
+                simulate.setOnMousePressed(e -> voice.simulateVoiceKeyPress(
+                    studioState.getSelectedMode(),
+                    key.getVoicePreset(),
+                    triggerMode
+                ));
+                simulate.setOnMouseReleased(e -> voice.simulateVoiceKeyRelease(
+                    studioState.getSelectedMode(),
+                    key.getVoicePreset(),
+                    triggerMode
+                ));
+            } else {
+                simulate.setOnAction(e -> voice.simulateVoiceKeyTap(
+                    studioState.getSelectedMode(),
+                    key.getVoicePreset(),
+                    triggerMode
+                ));
+            }
 
             Label hint = new Label();
             hint.textProperty().bind(voice.lastSimulateHintProperty());
@@ -390,6 +451,9 @@ public class InspectorPane extends ScrollPane {
         
         keySelector.getItems().addAll(keyItems);
         keySelector.getStyleClass().addAll("combo-box", "combo-box-small");
+        keySelector.setMinWidth(0);
+        keySelector.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(keySelector, Priority.ALWAYS);
         keySelector.setValue("--- 修饰键 ---");
 
         Button addBtn = new Button("添加");
@@ -790,26 +854,12 @@ public class InspectorPane extends ScrollPane {
         VBox statesBox = createGroupBox(mode.getTitle() + " AI 状态灯效", () -> {
             VBox box = new VBox(12);
             for (IDEState ideState : IDEState.values()) {
-                VBox row = new VBox(6);
-                HBox top = new HBox(8);
-                top.setAlignment(Pos.CENTER_LEFT);
-
-                Label title = new Label(ideState.getLabel());
-                title.getStyleClass().add("mapping-title");
-                title.setMinWidth(112);
-                title.setPrefWidth(112);
-                Label help = new Label("?");
-                help.getStyleClass().add("mapping-hw");
-                help.setMinWidth(18);
-                javafx.scene.control.Tooltip.install(help, new javafx.scene.control.Tooltip(ideState.getDescription()));
-                HBox spacer = new HBox();
-                HBox.setHgrow(spacer, Priority.ALWAYS);
-
                 ComboBox<LightEffectStyle> combo = new ComboBox<>();
                 combo.getItems().addAll(LightEffectStyle.values());
                 combo.setValue(studioState.getAiLightEffect(mode, ideState));
-                combo.setMinWidth(180);
-                combo.setPrefWidth(210);
+                combo.setMinWidth(0);
+                combo.setMaxWidth(Double.MAX_VALUE);
+                HBox.setHgrow(combo, Priority.ALWAYS);
                 combo.valueProperty().addListener((obs, oldValue, newValue) -> {
                     if (newValue != null) {
                         studioState.setAiLightEffect(mode, ideState, newValue);
@@ -820,12 +870,7 @@ public class InspectorPane extends ScrollPane {
                 test.setDisable(!deviceStatus.isConnected());
                 test.setOnAction(e -> controller.previewLightEffectOnDevice(combo.getValue()));
 
-                top.getChildren().addAll(title, help, spacer, combo, test);
-                Label desc = new Label(ideState.getDescription());
-                desc.getStyleClass().add("group-note");
-                desc.setWrapText(true);
-                row.getChildren().addAll(top, desc);
-                box.getChildren().add(row);
+                box.getChildren().add(createLightEffectRow(ideState, combo, test));
                 box.getChildren().add(new Separator());
             }
 
@@ -846,6 +891,25 @@ public class InspectorPane extends ScrollPane {
 
         root.getChildren().addAll(brightnessBox, statesBox);
         return root;
+    }
+
+    static VBox createLightEffectRow(IDEState state, ComboBox<LightEffectStyle> combo, Button test) {
+        Label title = new Label(state.getLabel());
+        title.getStyleClass().add("mapping-title");
+        title.setLabelFor(combo);
+        combo.setMinWidth(0);
+        combo.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(combo, Priority.ALWAYS);
+        test.setMinWidth(USE_PREF_SIZE);
+        HBox controls = new HBox(8, combo, test);
+        controls.setAlignment(Pos.CENTER_LEFT);
+        Label description = new Label(state.getDescription());
+        description.getStyleClass().add("group-note");
+        description.setWrapText(true);
+        VBox row = new VBox(6, title, controls, description);
+        row.setMinWidth(0);
+        row.getStyleClass().add("light-effect-row");
+        return row;
     }
     private Label caption(String text) {
         Label label = new Label(text);
@@ -997,6 +1061,7 @@ public class InspectorPane extends ScrollPane {
 
         Label titleLabel = new Label(title);
         titleLabel.getStyleClass().add("group-box-title");
+        titleLabel.setWrapText(true);
 
         VBox inner = contentProvider.get();
         inner.setPadding(new Insets(4, 0, 0, 0));

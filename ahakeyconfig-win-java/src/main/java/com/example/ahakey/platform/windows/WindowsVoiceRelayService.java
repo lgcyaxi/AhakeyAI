@@ -5,6 +5,7 @@ import com.example.ahakey.model.ModeSlot;
 import com.example.ahakey.model.StudioPart;
 import com.example.ahakey.model.StudioState;
 import com.example.ahakey.model.VoicePreset;
+import com.example.ahakey.model.VoiceTriggerMode;
 import com.sun.jna.Structure;
 import com.sun.jna.platform.win32.Kernel32;
 import com.sun.jna.platform.win32.User32;
@@ -20,13 +21,18 @@ import javafx.beans.property.SimpleStringProperty;
 import javafx.beans.property.StringProperty;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.BooleanSupplier;
+import java.util.function.IntConsumer;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
 /**
  * Windows F17/F18 relay. The selected VoicePreset decides whether a matching
- * key opens Windows Voice Typing or starts the optional local model.
+ * key opens Windows Voice Typing, toggles WeChat voice input, or starts the
+ * optional local model.
  */
 public final class WindowsVoiceRelayService {
     private static final int WH_KEYBOARD_LL = 13;
@@ -37,6 +43,8 @@ public final class WindowsVoiceRelayService {
 
     private static WindowsVoiceRelayService instance;
 
+    private final Runnable nativeVoiceToggle;
+    private final IntConsumer hidShortcutTap;
     private final BooleanProperty listening = new SimpleBooleanProperty(false);
     private final StringProperty statusMessage = new SimpleStringProperty("语音桥尚未启动。");
     private final StringProperty activeRouteSummary = new SimpleStringProperty("未配置路由。");
@@ -52,16 +60,54 @@ public final class WindowsVoiceRelayService {
     private Runnable onVoiceKeyUp;
     private Runnable onSimulateRecordStart;
     private Runnable onSimulateRecordStop;
+    private BooleanSupplier localVoiceRecordingSupplier = () -> false;
 
-    private record VoiceRoute(
+    record VoiceRoute(
         int vkCode,
         ModeSlot mode,
         VoicePreset preset,
+        VoiceTriggerMode triggerMode,
         boolean factoryFallback
     ) {
     }
 
-    private final List<VoiceRoute> routes = new ArrayList<>();
+    static final class PressState {
+        private final Map<Integer, VoiceRoute> active = new HashMap<>();
+
+        synchronized VoiceRoute begin(int vkCode, VoiceRoute route) {
+            if (active.containsKey(vkCode)) {
+                return null;
+            }
+            active.put(vkCode, route);
+            return route;
+        }
+
+        synchronized VoiceRoute end(int vkCode) {
+            return active.remove(vkCode);
+        }
+
+        synchronized List<VoiceRoute> drain() {
+            List<VoiceRoute> held = List.copyOf(active.values());
+            active.clear();
+            return held;
+        }
+    }
+
+    private volatile List<VoiceRoute> routes = List.of();
+    private final PressState pressState = new PressState();
+
+    WindowsVoiceRelayService() {
+        this(WindowsVoiceTyping::trigger, null);
+    }
+
+    WindowsVoiceRelayService(Runnable nativeVoiceToggle) {
+        this(nativeVoiceToggle, null);
+    }
+
+    WindowsVoiceRelayService(Runnable nativeVoiceToggle, IntConsumer hidShortcutTap) {
+        this.nativeVoiceToggle = nativeVoiceToggle;
+        this.hidShortcutTap = hidShortcutTap == null ? this::simulateKeyByHid : hidShortcutTap;
+    }
 
     public static synchronized WindowsVoiceRelayService getInstance() {
         if (instance == null) {
@@ -119,19 +165,26 @@ public final class WindowsVoiceRelayService {
         this.onSimulateRecordStop = callback;
     }
 
+    public void setLocalVoiceRecordingSupplier(BooleanSupplier supplier) {
+        this.localVoiceRecordingSupplier = supplier == null ? () -> false : supplier;
+    }
+
     public void updateRoutes(StudioState state) {
-        routes.clear();
         if (state == null) {
+            routes = List.of();
             activeRouteSummary.set("未配置路由。");
             return;
         }
+        List<VoiceRoute> updatedRoutes = new ArrayList<>();
         for (ModeSlot mode : ModeSlot.values()) {
             var key = state.getKeyConfig(mode, StudioPart.KEY1);
             VoicePreset preset = key.getVoicePreset();
+            VoiceTriggerMode triggerMode = key.getVoiceTriggerMode();
+            if (triggerMode == null) {
+                triggerMode = VoiceTriggerMode.defaultFor(preset);
+            }
             
-            // WeChat/custom shortcuts are emitted directly by the keyboard.
-            if (preset != VoicePreset.WINDOWS_NATIVE
-                && preset != VoicePreset.LOCAL_MODEL) {
+            if (!preset.isStudioManagedOnWindows()) {
                 continue;
             }
             
@@ -139,13 +192,14 @@ public final class WindowsVoiceRelayService {
             if (vk <= 0) {
                 continue;
             }
-            routes.add(new VoiceRoute(vk, mode, preset, false));
+            updatedRoutes.add(new VoiceRoute(vk, mode, preset, triggerMode, false));
             if (mode == ModeSlot.MODE0 && vk != VK_F18) {
-                routes.add(new VoiceRoute(VK_F18, ModeSlot.MODE0, preset, true));
+                updatedRoutes.add(new VoiceRoute(VK_F18, ModeSlot.MODE0, preset, triggerMode, true));
             }
         }
+        routes = List.copyOf(updatedRoutes);
         if (routes.isEmpty()) {
-            activeRouteSummary.set("未启用 Windows 语音路由（Key1 需选 Win+H 预设）。");
+            activeRouteSummary.set("未启用 Windows 语音路由（Key1 需选择受支持的语音预设）。");
         } else {
             StringBuilder sb = new StringBuilder();
             for (VoiceRoute r : routes) {
@@ -155,6 +209,8 @@ public final class WindowsVoiceRelayService {
                 sb.append(r.mode.getShortName())
                     .append(" ")
                     .append(r.preset.getDisplayName())
+                    .append(" · ")
+                    .append(r.triggerMode)
                     .append(" VK=")
                     .append(String.format("0x%02X", r.vkCode));
             }
@@ -193,6 +249,7 @@ public final class WindowsVoiceRelayService {
     }
 
     public void stop() {
+        releaseHeldRoutes(false);
         if (hookThreadId != 0) {
             User32.INSTANCE.PostThreadMessage(hookThreadId, WinUser.WM_QUIT, new WPARAM(0), new LPARAM(0));
         }
@@ -213,37 +270,43 @@ public final class WindowsVoiceRelayService {
             lastSimulateHint.set("当前 Mode 没有需要 Studio 接管的语音路由。");
             return;
         }
-        simulateVoiceKeyTap(mode, route.preset);
+        simulateVoiceKeyTap(mode, route.preset, route.triggerMode);
     }
     
     /**
      * 根据语音预设模拟按键
      */
     public void simulateVoiceKeyTap(ModeSlot mode, VoicePreset preset) {
+        simulateVoiceKeyTap(mode, preset, VoiceTriggerMode.defaultFor(preset));
+    }
+
+    public void simulateVoiceKeyTap(
+        ModeSlot mode,
+        VoicePreset preset,
+        VoiceTriggerMode triggerMode
+    ) {
         switch (preset) {
-            case WINDOWS_NATIVE -> {
-                WindowsVoiceTyping.trigger();
-                lastSimulateHint.set("已发送 Win+H（" + mode.getShortName() + "）");
-            }
-            case LOCAL_MODEL -> {
-                if (onSimulateRecordStart != null) {
-                    onSimulateRecordStart.run();
-                    new Thread(() -> {
+            case WINDOWS_NATIVE, LOCAL_MODEL, WECHAT -> {
+                VoiceRoute route = new VoiceRoute(-1, mode, preset, triggerMode, false);
+                dispatchPress(route, true);
+                if (triggerMode.stopsOnRelease()) {
+                    Thread simulatedHold = new Thread(() -> {
                         try {
                             Thread.sleep(3000);
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
+                            return;
                         }
-                        if (onSimulateRecordStop != null) {
-                            onSimulateRecordStop.run();
-                        }
-                    }).start();
-                    lastSimulateHint.set("已开始本地录音（3 秒测试）");
+                        dispatchRelease(route, true);
+                    }, "voice-simulated-hold");
+                    simulatedHold.setDaemon(true);
+                    simulatedHold.start();
+                    lastSimulateHint.set("已开始 3 秒按住测试（" + mode.getShortName() + "）");
                 } else {
-                    lastSimulateHint.set("本地模型未启用，无法开始录音。");
+                    lastSimulateHint.set("已触发一次（" + mode.getShortName() + "）");
                 }
             }
-            case WECHAT, CUSTOM -> {
+            case CUSTOM -> {
                 StudioState state = studioStateSupplier.get();
                 if (state == null) {
                     lastSimulateHint.set("语音配置尚未加载。");
@@ -254,6 +317,33 @@ public final class WindowsVoiceRelayService {
             case MACOS_NATIVE, TYPELESS ->
                 lastSimulateHint.set("当前语音预设不受 Windows 客户端支持。");
         }
+    }
+
+    public void simulateVoiceKeyPress(
+        ModeSlot mode,
+        VoicePreset preset,
+        VoiceTriggerMode triggerMode
+    ) {
+        if (!preset.isStudioManagedOnWindows()) {
+            lastSimulateHint.set("这个语音方式由键盘直接发送，Studio 不接管按住状态。");
+            return;
+        }
+        VoiceRoute route = new VoiceRoute(-1, mode, preset, triggerMode, false);
+        dispatchPress(route, true);
+        lastSimulateHint.set("测试按键已按下（" + mode.getShortName() + "）");
+    }
+
+    public void simulateVoiceKeyRelease(
+        ModeSlot mode,
+        VoicePreset preset,
+        VoiceTriggerMode triggerMode
+    ) {
+        if (!preset.isStudioManagedOnWindows() || !triggerMode.stopsOnRelease()) {
+            return;
+        }
+        VoiceRoute route = new VoiceRoute(-1, mode, preset, triggerMode, false);
+        dispatchRelease(route, true);
+        lastSimulateHint.set("测试按键已松开（" + mode.getShortName() + "）");
     }
     
     /**
@@ -436,36 +526,82 @@ public final class WindowsVoiceRelayService {
 
     private LRESULT handleHookEvent(int message, WinUser.KBDLLHOOKSTRUCT evt) {
         int vk = evt.vkCode;
+        int upFlag = 0x0080;
+        if ((evt.flags & upFlag) != 0) {
+            VoiceRoute captured = pressState.end(vk);
+            VoiceRoute current = captured == null ? matchRoute(vk) : captured;
+            if (current == null) {
+                return null;
+            }
+            if (message == WM_KEYUP && captured != null && captured.triggerMode.stopsOnRelease()) {
+                dispatchRelease(captured, false);
+            }
+            return new LRESULT(1);
+        }
         VoiceRoute route = matchRoute(vk);
         if (route == null) {
             return null;
         }
-        int upFlag = 0x0080;
-        if ((evt.flags & upFlag) != 0) {
-            if (message == WM_KEYUP
-                && route.preset == VoicePreset.LOCAL_MODEL
-                && onVoiceKeyUp != null) {
-                onVoiceKeyUp.run();
-            }
-            return new LRESULT(1);
-        }
-        if ((evt.flags & 0x40000000) != 0) {
-            return new LRESULT(1);
-        }
         if (message == WM_KEYDOWN) {
-            if (route.preset == VoicePreset.WINDOWS_NATIVE) {
-                WindowsVoiceTyping.trigger();
-            } else if (route.preset == VoicePreset.LOCAL_MODEL) {
-                if (onVoiceKeyDown != null) {
-                    onVoiceKeyDown.run();
-                } else {
-                    Platform.runLater(() ->
-                        statusMessage.set("已选择本地模型，但本地语音服务未启用。")
-                    );
-                }
+            VoiceRoute captured = pressState.begin(vk, route);
+            if (captured != null) {
+                dispatchPress(captured, false);
             }
         }
         return new LRESULT(1);
+    }
+
+    void dispatchPress(VoiceRoute route, boolean simulated) {
+        if (route.preset == VoicePreset.WINDOWS_NATIVE) {
+            nativeVoiceToggle.run();
+            return;
+        }
+        if (route.preset == VoicePreset.WECHAT) {
+            hidShortcutTap.accept(VoicePreset.WECHAT_HID_CODE);
+            return;
+        }
+        if (route.preset != VoicePreset.LOCAL_MODEL) {
+            return;
+        }
+
+        boolean toggleStop = route.triggerMode == VoiceTriggerMode.TOGGLE
+            && localVoiceRecordingSupplier.getAsBoolean();
+        Runnable callback = toggleStop
+            ? (simulated ? onSimulateRecordStop : onVoiceKeyUp)
+            : (simulated ? onSimulateRecordStart : onVoiceKeyDown);
+        if (callback != null) {
+            callback.run();
+        } else {
+            Platform.runLater(() ->
+                statusMessage.set("已选择本地模型，但本地语音服务未启用。")
+            );
+        }
+    }
+
+    void dispatchRelease(VoiceRoute route, boolean simulated) {
+        if (!route.triggerMode.stopsOnRelease()) {
+            return;
+        }
+        if (route.preset == VoicePreset.WINDOWS_NATIVE) {
+            nativeVoiceToggle.run();
+            return;
+        }
+        if (route.preset == VoicePreset.WECHAT) {
+            hidShortcutTap.accept(VoicePreset.WECHAT_HID_CODE);
+            return;
+        }
+        if (route.preset == VoicePreset.LOCAL_MODEL) {
+            Runnable callback = simulated ? onSimulateRecordStop : onVoiceKeyUp;
+            if (callback != null) {
+                callback.run();
+            }
+        }
+    }
+
+    private void releaseHeldRoutes(boolean simulated) {
+        for (VoiceRoute route : pressState.drain()) {
+            dispatchRelease(route, simulated);
+        }
     }
 
     private VoiceRoute matchRoute(int vkCode) {
@@ -473,7 +609,8 @@ public final class WindowsVoiceRelayService {
         ModeSlot active = ModeSlot.fromIndex(workMode);
         VoiceRoute preferred = null;
         VoiceRoute fallback = null;
-        for (VoiceRoute route : routes) {
+        List<VoiceRoute> routeSnapshot = routes;
+        for (VoiceRoute route : routeSnapshot) {
             if (route.vkCode != vkCode) {
                 continue;
             }
@@ -490,7 +627,7 @@ public final class WindowsVoiceRelayService {
         if (fallback != null) {
             return fallback;
         }
-        return routes.stream().filter(r -> r.vkCode == vkCode).findFirst().orElse(null);
+        return routeSnapshot.stream().filter(r -> r.vkCode == vkCode).findFirst().orElse(null);
     }
 
     private void refreshStatus() {

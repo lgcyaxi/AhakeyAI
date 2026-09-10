@@ -1,10 +1,10 @@
 package com.example.ahakey.model;
 
 public enum ModeSlot {
-    MODE0(0, "Mode 1", "Claude", ""),
-    MODE1(1, "Mode 2", "Cursor", ""),
-    MODE2(2, "Mode 3", "Codex", ""),
-    MODE3(3, "Mode 4", "Mode 4", "");
+    MODE0(0, "Profile 1", "Claude Code", "终端客户端"),
+    MODE1(1, "Profile 2", "Claude Desktop", "桌面客户端"),
+    MODE2(2, "Profile 3", "Codex CLI", "终端客户端"),
+    MODE3(3, "Profile 4", "ChatGPT App", "桌面客户端");
 
     private final int index;
     private final String title;

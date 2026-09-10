@@ -54,7 +54,7 @@ public class StudioController {
                 Platform.runLater(() -> {
                     clearDeviceConnectionState();
                     studioState.syncStatusProperty().set(
-                        "BLE 配置驱动已就绪，正在等待 AhaKey 设备。Windows 麦克风是独立的音频通道。"
+                        "设备后台已启动，正在连接键盘。语音输入可以独立使用。"
                     );
                 });
                 startStatusPolling();
@@ -66,6 +66,10 @@ public class StudioController {
                 Platform.runLater(() -> {
                     DeviceStatus status = bleManager.getCachedStatus();
                     applyBleStatus(status);
+                    String message = studioState.syncStatusProperty().get();
+                    if (message.startsWith("设备后台") || message.startsWith("BLE 配置驱动")) {
+                        studioState.syncStatusProperty().set("设备已连接。配置修改先保存在本机，保存配置后写入键盘。");
+                    }
                 });
                 // 有线（USB HID）连接时启动 Kimi AhaKey 桥接（无线模式下 9000 端口已由 BLE-TCP bridge 占用）
                 if (bleManager.isUsbConnected()) {
@@ -631,13 +635,25 @@ public class StudioController {
     }
     public void applyVoicePreset(VoicePreset preset) {
         var key = studioState.getKeyConfig(StudioPart.KEY1);
+        VoicePreset previousPreset = key.getVoicePreset();
+        VoiceTriggerMode previousDefault = VoiceTriggerMode.defaultFor(previousPreset);
         key.setVoicePreset(preset);
+        if (key.getVoiceTriggerMode() == previousDefault) {
+            key.setVoiceTriggerMode(VoiceTriggerMode.defaultFor(preset));
+        }
         if (preset.locksShortcut()) {
             key.setHidCode(preset.windowsHidCode(
                 studioState.getSelectedMode(),
                 key.getHidCode()
             ));
         }
+        studioState.markDirty(StudioPart.KEY1);
+        refreshVoiceRoutes();
+    }
+
+    public void applyVoiceTriggerMode(VoiceTriggerMode triggerMode) {
+        var key = studioState.getKeyConfig(StudioPart.KEY1);
+        key.setVoiceTriggerMode(triggerMode);
         studioState.markDirty(StudioPart.KEY1);
         refreshVoiceRoutes();
     }

@@ -32,6 +32,7 @@ namespace BLE_tcp_driver
         /// TCP客户端数量变化事件
         /// </summary>
         public event Action<int> OnClientCountChanged;
+        public Func<PacketType, byte[], byte[]> HandleDeviceControl { get; set; }
 
         public int Port => _port;
         public int ClientCount { get { lock (_clientLock) return _clients.Count; } }
@@ -84,6 +85,7 @@ namespace BLE_tcp_driver
                 try
                 {
                     var client = await _listener.AcceptTcpClientAsync();
+                    client.SendTimeout = 3000;
                     lock (_clientLock) _clients.Add(client);
 
                     string ep = GetEndpointString(client);
@@ -130,7 +132,7 @@ namespace BLE_tcp_driver
                         if (n < dataLen) break;
                     }
 
-                    HandlePacket(client, type, data);
+                    await _bleCore.DispatchAsync(() => HandlePacket(client, type, data));
                 }
             }
             catch (IOException) { }
@@ -148,8 +150,17 @@ namespace BLE_tcp_driver
         /// </summary>
         private void HandlePacket(TcpClient client, PacketType type, byte[] data)
         {
+            data = data ?? new byte[0];
             switch (type)
             {
+                case PacketType.ListDevices:
+                case PacketType.SelectDevice:
+                case PacketType.ScanDevices:
+                case PacketType.DisconnectDevice:
+                case PacketType.QueryBridgeInfo:
+                case PacketType.ShutdownBridge:
+                    if (HandleDeviceControl != null) SendToClient(client, HandleDeviceControl(type, data));
+                    break;
                 case PacketType.WriteData:
                     if (_bleCore.CurrentDataCharacteristic != null)
                     {
@@ -232,9 +243,7 @@ namespace BLE_tcp_driver
                 mac = BitConverter.ToString(macBytes, 2, 6).Replace('-', ':');
             }
 
-            bool isTarget = _bleCore.CurrentDataCharacteristic != null
-                         && _bleCore.CurrentWriteCharacteristic != null
-                         && _bleCore.CurrentNotifyCharacteristic != null;
+            bool isTarget = _bleCore.IsReady;
 
             return new BleStatusInfo
             {
@@ -295,8 +304,11 @@ namespace BLE_tcp_driver
             {
                 if (client.Connected)
                 {
-                    var stream = client.GetStream();
-                    stream.Write(packet, 0, packet.Length);
+                    lock (client)
+                    {
+                        var stream = client.GetStream();
+                        stream.Write(packet, 0, packet.Length);
+                    }
                 }
             }
             catch { RemoveClient(client); }

@@ -43,6 +43,28 @@ public class BleManager {
     private DeviceStatus cachedStatus = new DeviceStatus();
     private volatile long lastStatusUpdateTime = 0;  // 最后一次状态更新时间
 
+    public record DiscoveredDevice(String id, String name, String mac) {
+        @Override public String toString() { return name == null || name.isBlank() ? "未命名设备" : name; }
+    }
+    public record DiscoverySnapshot(java.util.List<DiscoveredDevice> devices, String state, String error) {}
+    private volatile java.util.function.Consumer<DiscoverySnapshot> discoveryListener = value -> {};
+    private volatile DiscoverySnapshot discovery = new DiscoverySnapshot(java.util.List.of(), "disconnected", "");
+    public void setDeviceDiscoveryListener(java.util.function.Consumer<DiscoverySnapshot> listener) {
+        discoveryListener = listener == null ? value -> {} : listener;
+        discoveryListener.accept(discovery);
+    }
+    public void requestDevices() { deviceControl((byte) 0x05, new byte[0]); }
+    public void rescanDevices() { deviceControl((byte) 0x07, new byte[0]); }
+    public void disconnectDevice() { deviceControl((byte) 0x08, new byte[0]); }
+    public void selectDevice(String id) {
+        if (id != null && !id.isBlank()) deviceControl((byte) 0x06, id.getBytes(StandardCharsets.UTF_8));
+    }
+    private void deviceControl(byte type, byte[] payload) {
+        if (!isTcpTransportConnected()) return;
+        try { writePacket(type, payload); }
+        catch (IOException ex) { discoveryListener.accept(new DiscoverySnapshot(discovery.devices(), "error", "后台连接已断开，请重新连接")); }
+    }
+
     public interface BleCallback {
         void onTransportReady();
         void onConnected();
@@ -118,7 +140,7 @@ public class BleManager {
                 logger.warn("BLE bridge connect failed - {}:{}: {}", host, port, e.getMessage());
                 callback.onError(
                     "未连接到 AhaKey 配置通道。Windows 麦克风是音频通道，不代表配置通道已连接。" +
-                    "请先点击‘BLE 配置驱动’，等待驱动发现设备后再重试。详情: " + e.getMessage()
+                    "请在‘设备’页刷新并选择键盘后重试。详情: " + e.getMessage()
                 );
             }
         }, "device-connect").start();
@@ -570,6 +592,23 @@ public class BleManager {
     private void handlePacket(byte type, byte[] data) {
         logger.debug("收到 TCP 包: type=0x{}, len={}", Integer.toHexString(type & 0xFF), data == null ? 0 : data.length);
         switch (type) {
+            case (byte) 0x84 -> {
+                try {
+                    var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(data);
+                    var items = new java.util.ArrayList<DiscoveredDevice>();
+                    for (var item : json.path("devices")) items.add(new DiscoveredDevice(
+                        item.path("id").asText(), item.path("name").asText(), item.path("mac").asText()));
+                    discovery = new DiscoverySnapshot(java.util.List.copyOf(items), json.path("state").asText("disconnected"), json.path("error").asText(""));
+                    discoveryListener.accept(discovery);
+                } catch (IOException | RuntimeException ex) { logger.warn("Invalid BLE discovery response"); }
+            }
+            case (byte) 0x85 -> {
+                try {
+                    var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(data);
+                    if (!json.path("ok").asBoolean()) discoveryListener.accept(new DiscoverySnapshot(discovery.devices(), "error", json.path("message").asText("操作未完成")));
+                    else requestDevices();
+                } catch (IOException | RuntimeException ex) { logger.warn("Invalid BLE control response"); }
+            }
             case BleTcpPacket.BLE_NOTIFY -> onBleNotify(data);
             case BleTcpPacket.DEVICE_INFO_RESP -> {
                 if (data != null && data.length >= 8 && cachedStatus.isConnected()) {

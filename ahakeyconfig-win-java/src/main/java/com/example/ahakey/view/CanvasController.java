@@ -11,6 +11,9 @@ import javafx.animation.Timeline;
 import javafx.beans.binding.Bindings;
 import javafx.fxml.FXML;
 import javafx.scene.control.Label;
+import javafx.scene.control.Tooltip;
+import javafx.scene.AccessibleRole;
+import javafx.scene.input.KeyCode;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
 import javafx.scene.layout.Region;
@@ -100,7 +103,28 @@ public class CanvasController {
     private static final String COLOR_AMBER = "#ff9f0a";
     
     public void initialize() {
-        // 初始化时绑定事件
+        for (Label caption : new Label[]{key1Caption, key2Caption, key3Caption, key4Caption}) {
+            caption.setMinWidth(0);
+            caption.setMaxWidth(Double.MAX_VALUE);
+            caption.setWrapText(true);
+            caption.setMaxHeight(36);
+            caption.setAlignment(javafx.geometry.Pos.CENTER);
+            caption.setTextAlignment(javafx.scene.text.TextAlignment.CENTER);
+            Tooltip tooltip = new Tooltip();
+            tooltip.textProperty().bind(caption.textProperty());
+            caption.setTooltip(tooltip);
+        }
+        oledTitle.setMinWidth(0);
+        oledCaption.setMinWidth(0);
+        oledTitle.setMaxWidth(116);
+        oledTitle.setWrapText(true);
+        oledTitle.setMaxHeight(36);
+        oledTitle.setAlignment(javafx.geometry.Pos.CENTER);
+        oledTitle.setTextAlignment(javafx.scene.text.TextAlignment.CENTER);
+        oledCaption.setMaxWidth(116);
+        // Leave the OLED frame's padding available instead of drawing a 140px image in 116px.
+        oledPreviewImage.setFitWidth(116);
+        oledPreviewImage.setFitHeight(56);
     }
     
     public void setStudioState(StudioState studioState) {
@@ -127,13 +151,13 @@ public class CanvasController {
     }
     
     private void bindEvents() {
-        lightBarCard.setOnMouseClicked(e -> studioState.setSelectedPart(StudioPart.LIGHT_BAR));
-        oledCard.setOnMouseClicked(e -> studioState.setSelectedPart(StudioPart.OLED));
-        key1Card.setOnMouseClicked(e -> studioState.setSelectedPart(StudioPart.KEY1));
-        key2Card.setOnMouseClicked(e -> studioState.setSelectedPart(StudioPart.KEY2));
-        key3Card.setOnMouseClicked(e -> studioState.setSelectedPart(StudioPart.KEY3));
-        key4Card.setOnMouseClicked(e -> studioState.setSelectedPart(StudioPart.KEY4));
-        toggleCard.setOnMouseClicked(e -> studioState.setSelectedPart(StudioPart.TOGGLE_SWITCH));
+        bindHotspot(lightBarCard, StudioPart.LIGHT_BAR);
+        bindHotspot(oledCard, StudioPart.OLED);
+        bindHotspot(key1Card, StudioPart.KEY1);
+        bindHotspot(key2Card, StudioPart.KEY2);
+        bindHotspot(key3Card, StudioPart.KEY3);
+        bindHotspot(key4Card, StudioPart.KEY4);
+        bindHotspot(toggleCard, StudioPart.TOGGLE_SWITCH);
         
         studioState.selectedPartProperty().addListener((obs, old, newPart) -> refreshHotspots());
         studioState.selectedModeProperty().addListener((obs, old, newMode) -> refreshPreview());
@@ -143,6 +167,22 @@ public class CanvasController {
             refreshPreview();
             animationFrame = 0;
             setStableLightPreview();
+        });
+    }
+
+    private void bindHotspot(StackPane card, StudioPart part) {
+        card.setFocusTraversable(true);
+        card.setAccessibleRole(AccessibleRole.BUTTON);
+        card.setAccessibleText(part.getDisplayTitle());
+        card.setOnMouseClicked(e -> {
+            card.requestFocus();
+            studioState.setSelectedPart(part);
+        });
+        card.setOnKeyPressed(e -> {
+            if (e.getCode() == KeyCode.ENTER || e.getCode() == KeyCode.SPACE) {
+                studioState.setSelectedPart(part);
+                e.consume();
+            }
         });
     }
     
@@ -167,6 +207,10 @@ public class CanvasController {
         if (key2Caption != null) key2Caption.setText(studioState.getKeyConfig(mode, StudioPart.KEY2).getDescription());
         if (key3Caption != null) key3Caption.setText(studioState.getKeyConfig(mode, StudioPart.KEY3).getDescription());
         if (key4Caption != null) key4Caption.setText(studioState.getKeyConfig(mode, StudioPart.KEY4).getDescription());
+        key1Card.setAccessibleText("Key 1 · " + key1Caption.getText());
+        key2Card.setAccessibleText("Key 2 · " + key2Caption.getText());
+        key3Card.setAccessibleText("Key 3 · " + key3Caption.getText());
+        key4Card.setAccessibleText("Key 4 · " + key4Caption.getText());
     }
 
     private void refreshOledPreviewImage(ModeSlot mode) {

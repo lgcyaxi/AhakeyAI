@@ -44,8 +44,7 @@ class HookEndpointTest {
     @Test
     void serverPublishesThePortItActuallyBound() throws Exception {
         Path path = temporaryDirectory.resolve("active-endpoint.json");
-        try (ServerSocket occupied = new ServerSocket()) {
-            occupied.bind(new InetSocketAddress(HookEndpoint.LOOPBACK_HOST, 0));
+        try (ServerSocket occupied = occupyPortWithAvailableSuccessor()) {
             HookDispatchServer server = new HookDispatchServer(null, occupied.getLocalPort(), path);
             try {
                 server.start();
@@ -58,6 +57,29 @@ class HookEndpointTest {
             }
         }
         assertFalse(Files.exists(path));
+    }
+
+    private static ServerSocket occupyPortWithAvailableSuccessor() throws IOException {
+        for (int attempt = 0; attempt < 100; attempt++) {
+            ServerSocket occupied = new ServerSocket();
+            occupied.bind(new InetSocketAddress(HookEndpoint.LOOPBACK_HOST, 0));
+            int successorPort = occupied.getLocalPort() + 1;
+            if (successorPort > 65535) {
+                occupied.close();
+                continue;
+            }
+
+            try (ServerSocket successorProbe = new ServerSocket()) {
+                successorProbe.bind(new InetSocketAddress(
+                    HookEndpoint.LOOPBACK_HOST,
+                    successorPort
+                ));
+                return occupied;
+            } catch (IOException unavailableSuccessor) {
+                occupied.close();
+            }
+        }
+        throw new IOException("Could not reserve an occupied port with an available successor");
     }
 
     @Test
