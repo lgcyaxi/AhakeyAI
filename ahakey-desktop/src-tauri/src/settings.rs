@@ -314,9 +314,11 @@ mod tests {
             .path()
             .join("ai.ahakey.studio.app006.routing.preview/settings.json");
         let production = temp.path().join("ai.ahakey.studio/settings.json");
-        let mut expected = Settings::default();
-        expected.voice_keys_enabled = false;
-        expected.active_profile = "chatgpt-app".into();
+        let mut expected = Settings {
+            voice_keys_enabled: false,
+            active_profile: "chatgpt-app".into(),
+            ..Settings::default()
+        };
         save(&preview, &expected).unwrap();
         let before = fs::read(&preview).unwrap();
         assert_eq!(load_for_launch(&production).unwrap(), expected);
