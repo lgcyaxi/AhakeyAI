@@ -3,6 +3,7 @@ package com.example.ahakey.platform;
 import com.example.ahakey.model.ModeSlot;
 import com.example.ahakey.model.StudioState;
 import com.example.ahakey.model.VoicePreset;
+import com.example.ahakey.model.VoiceTriggerMode;
 import com.example.ahakey.platform.windows.WindowsVoiceRelayService;
 import com.example.ahakey.platform.windows.WindowsVoiceTyping;
 
@@ -42,6 +43,30 @@ public final class VoiceRelayPlatform {
     
     public void simulateVoiceKeyTap(ModeSlot mode, VoicePreset preset) {
         windows.simulateVoiceKeyTap(mode, preset);
+    }
+
+    public void simulateVoiceKeyTap(
+        ModeSlot mode,
+        VoicePreset preset,
+        VoiceTriggerMode triggerMode
+    ) {
+        windows.simulateVoiceKeyTap(mode, preset, triggerMode);
+    }
+
+    public void simulateVoiceKeyPress(
+        ModeSlot mode,
+        VoicePreset preset,
+        VoiceTriggerMode triggerMode
+    ) {
+        windows.simulateVoiceKeyPress(mode, preset, triggerMode);
+    }
+
+    public void simulateVoiceKeyRelease(
+        ModeSlot mode,
+        VoicePreset preset,
+        VoiceTriggerMode triggerMode
+    ) {
+        windows.simulateVoiceKeyRelease(mode, preset, triggerMode);
     }
 
     public void simulateKeyByHid(int hidCode) {

@@ -4,7 +4,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.LinkedHashSet;
 import java.util.Properties;
+import java.util.Set;
 
 /**
  * 模型配置管理器
@@ -33,12 +38,13 @@ public class ModelConfig {
     private static final String LANGUAGE = "language";
     private static final String TEXT_NORM = "text_norm";
     private static final String STATUS_POLL_PERIOD = "status.poll.period.seconds";
+    private static final String EXTERNAL_CONFIG_PROPERTY = "ahakey.model.config";
     
     // 默认配置值
     private static final boolean DEFAULT_MODEL_ENABLED = false;
-    private static final String DEFAULT_MODEL_PATH = "model_q8.onnx";
-    private static final String DEFAULT_TOKENS_PATH = "tokens.txt";
-    private static final String DEFAULT_MODEL_TYPE = "SENSE_VOICE_SMALL";
+    private static final String DEFAULT_MODEL_PATH = "models/model.int8.onnx";
+    private static final String DEFAULT_TOKENS_PATH = "models/tokens.txt";
+    private static final String DEFAULT_MODEL_TYPE = "SenseVoice INT8 2024-07-17";
     private static final int DEFAULT_NUM_THREADS = 4;
     private static final int DEFAULT_SAMPLE_RATE = 16000;
     private static final int DEFAULT_N_FFT = 512;
@@ -49,6 +55,7 @@ public class ModelConfig {
     private static final int DEFAULT_LANGUAGE = 0;
     private static final int DEFAULT_TEXT_NORM = 0;
     private static final int DEFAULT_STATUS_POLL_PERIOD = 3;
+    private Path externalConfigPath;
     
     private ModelConfig() {
         loadConfig();
@@ -77,16 +84,72 @@ public class ModelConfig {
     private void loadConfig() {
         properties = new Properties();
         
-        // 尝试从类路径加载配置文件
+        // Load safe built-in defaults first.
         try (InputStream is = getClass().getResourceAsStream("/model_config.properties")) {
             if (is != null) {
                 properties.load(is);
-                logger.info("模型配置文件加载成功");
+                logger.info("Bundled model configuration loaded");
             } else {
-                logger.warn("未找到模型配置文件，使用默认配置");
+                logger.warn("Bundled model configuration not found; using defaults");
             }
         } catch (IOException e) {
-            logger.error("加载模型配置文件失败: {}", e.getMessage(), e);
+            logger.error("Failed to load bundled model configuration: {}", e.getMessage(), e);
+        }
+
+        // A model-enabled app-image writes this file beside its application
+        // JAR. It overrides the safe disabled defaults without modifying the
+        // source tree or embedding machine-specific paths.
+        externalConfigPath = findExternalConfig();
+        if (externalConfigPath != null) {
+            try (InputStream is = Files.newInputStream(externalConfigPath)) {
+                properties.load(is);
+                logger.info("External model configuration loaded: {}", externalConfigPath);
+            } catch (IOException e) {
+                logger.error(
+                    "Failed to load external model configuration {}: {}",
+                    externalConfigPath,
+                    e.getMessage(),
+                    e
+                );
+            }
+        }
+    }
+
+    private Path findExternalConfig() {
+        Set<Path> candidates = new LinkedHashSet<>();
+        String explicit = System.getProperty(EXTERNAL_CONFIG_PROPERTY);
+        if (explicit != null && !explicit.isBlank()) {
+            candidates.add(Path.of(explicit).toAbsolutePath().normalize());
+        }
+
+        Path applicationDirectory = applicationDirectory();
+        if (applicationDirectory != null) {
+            candidates.add(applicationDirectory.resolve("model_config.properties").normalize());
+        }
+        candidates.add(
+            Path.of("").toAbsolutePath().normalize().resolve("model_config.properties")
+        );
+
+        for (Path candidate : candidates) {
+            if (Files.isRegularFile(candidate)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private Path applicationDirectory() {
+        try {
+            var codeSource = getClass().getProtectionDomain().getCodeSource();
+            if (codeSource == null || codeSource.getLocation() == null) {
+                return null;
+            }
+            URI locationUri = codeSource.getLocation().toURI();
+            Path location = Path.of(locationUri).toAbsolutePath().normalize();
+            return Files.isDirectory(location) ? location : location.getParent();
+        } catch (Exception e) {
+            logger.debug("Cannot resolve application directory: {}", e.getMessage());
+            return null;
         }
     }
     
@@ -174,12 +237,33 @@ public class ModelConfig {
     public int getLanguage() {
         return getIntProperty(LANGUAGE, DEFAULT_LANGUAGE);
     }
+
+    public String getLanguageCode() {
+        String value = properties.getProperty(LANGUAGE, "auto").trim();
+        return switch (value.toLowerCase()) {
+            case "0" -> "auto";
+            case "1" -> "zh";
+            case "2" -> "en";
+            case "3" -> "ja";
+            case "4" -> "ko";
+            case "5" -> "yue";
+            default -> value;
+        };
+    }
     
     /**
      * 获取文本规范化设置
      */
     public int getTextNorm() {
         return getIntProperty(TEXT_NORM, DEFAULT_TEXT_NORM);
+    }
+
+    public boolean useInverseTextNormalization() {
+        String value = properties.getProperty(TEXT_NORM);
+        if (value == null || value.isBlank()) {
+            return DEFAULT_TEXT_NORM != 0;
+        }
+        return "1".equals(value.trim()) || Boolean.parseBoolean(value.trim());
     }
     
     /**
@@ -231,8 +315,9 @@ public class ModelConfig {
         logger.debug("Mel频段: {}", getNMels());
         logger.debug("特征维度: {}", getFeatureDim());
         logger.debug("每块帧数: {}", getFramesPerChunk());
-        logger.debug("语言: {}", getLanguage());
-        logger.debug("文本规范化: {}", getTextNorm());
+        logger.debug("语言: {}", getLanguageCode());
+        logger.debug("文本规范化: {}", useInverseTextNormalization());
+        logger.debug("外部配置: {}", externalConfigPath);
         logger.debug("==============================");
     }
 }

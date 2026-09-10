@@ -1,619 +1,314 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Windows.Devices.Bluetooth;
-using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Devices.Enumeration;
-using Windows.Foundation;
 using Windows.Security.Cryptography;
 using Windows.Storage.Streams;
+
 namespace BLE_tcp_driver
 {
-    class BleCore
+    // Connection state is owned by the host's message-loop thread. Watcher and
+    // WinRT callbacks are posted back there before touching connection objects.
+    class BleCore : IDisposable
     {
-        // "Magic" string for all BLE devices
-        static string _aqsAllBLEDevices = "(System.Devices.Aep.ProtocolId:=\"{bb7bb05e-5972-42b5-94fc-76eaa7084d49}\")";
-        static string[] _requestedBLEProperties = { "System.Devices.Aep.DeviceAddress", "System.Devices.Aep.Bluetooth.Le.IsConnectable", };
-        static List<DeviceInformation> _deviceList = new List<DeviceInformation>();
-        static DeviceWatcher watcher;
-
-        private bool asyncLock = false;
-        private int _pendingServiceCount = 0;
-
-        /// <summary>
-        /// 当前连接的服务
-        /// </summary>
-        public GattDeviceService CurrentService { get; private set; }
-
-        /// <summary>
-        /// 当前连接的蓝牙设备
-        /// </summary>
+        private readonly SynchronizationContext context = SynchronizationContext.Current;
+        private readonly List<DeviceInformation> devices = new List<DeviceInformation>();
+        private readonly List<GattDeviceService> services = new List<GattDeviceService>();
+        private readonly SemaphoreSlim writes = new SemaphoreSlim(1, 1);
+        private DeviceWatcher watcher;
+        private int generation;
+        private CancellationTokenSource connectionCancellation;
+        private GattSession session;
+        private bool notificationsReady;
+        public bool IsConnecting { get; private set; }
+        public bool IsReady => notificationsReady && CurrentWriteCharacteristic != null
+            && CurrentDataCharacteristic != null && CurrentDevice != null
+            && CurrentDevice.ConnectionStatus == BluetoothConnectionStatus.Connected;
         public BluetoothLEDevice CurrentDevice { get; private set; }
-
-        /// <summary>
-        /// 写特征对象 (命令 0x7343)
-        /// </summary>
         public GattCharacteristic CurrentWriteCharacteristic { get; set; }
-
-        /// <summary>
-        /// 数据写特征对象 (数据 0x7341)
-        /// </summary>
         public GattCharacteristic CurrentDataCharacteristic { get; set; }
-
-        /// <summary>
-        /// 通知特征对象 (通知 0x7344)
-        /// </summary>
         public GattCharacteristic CurrentNotifyCharacteristic { get; set; }
-
-        /// <summary>
-        /// 存储检测到的特征
-        /// </summary>
-        public List<GattCharacteristic> CharacteristicList { get; private set; }
-
-        /// <summary>
-        /// 特性通知类型通知启用
-        /// </summary>
-        private const GattClientCharacteristicConfigurationDescriptorValue CHARACTERISTIC_NOTIFICATION_TYPE = GattClientCharacteristicConfigurationDescriptorValue.Notify;
-
-
-        /// <summary>
-        /// 获取服务及特征完成事件
-        /// </summary>
-        public event CharacteristicFinishEvent CharacteristicFinish;
-        public delegate void CharacteristicFinishEvent(int size);
-
-        /// <summary>
-        /// 发现特征事件
-        /// </summary>
-        public event CharacteristicAddedEvent CharacteristicAdded;
-        public delegate void CharacteristicAddedEvent(GattCharacteristic gattCharacteristic);
-
-        /// <summary>
-        /// 发现设备事件
-        /// </summary>
-        public event DeviceAddedEvent DeviceAdded;
-        public delegate void DeviceAddedEvent(DeviceInformation deviceInformation);
-
-        /// <summary>
-        /// 设备连接成功事件
-        /// </summary>
-        public event ConnectDeviceSuccessEvent ConnectDeviceSuccess;
-        public delegate void ConnectDeviceSuccessEvent(BluetoothLEDevice bluetoothLEDevice);
-
-        /// <summary>
-        /// 向特征写事件成功事件
-        /// </summary>
-        public event WriteDataSuccessEvent WriteDataSuccess;
-        public delegate void WriteDataSuccessEvent(GattCharacteristic sendrt, byte[] data);
-
-        /// <summary>
-        /// 向特征读取事件成功事件
-        /// </summary>
-        public event ReadDataSuccessEvent ReadDataSuccess;
-        public delegate void ReadDataSuccessEvent(GattCharacteristic sendrt, byte[] data);
-
-
-        /// <summary>
-        /// 收到特征发送的通知事件
-        /// </summary>
-        public event ReceiveNotifyDataEvent ReceiveNotifyData;
-        public delegate void ReceiveNotifyDataEvent(GattCharacteristic sender, byte[] data);
-
-        /// <summary>
-        /// 设备断开连接事件
-        /// </summary>
+        public List<GattCharacteristic> CharacteristicList { get; } = new List<GattCharacteristic>();
+        public event Action<DeviceInformation> DeviceAdded;
+        public event Action<BluetoothLEDevice> ConnectDeviceSuccess;
         public event Action<BluetoothLEDevice> DeviceDisconnected;
-
-        /// <summary>
-        /// 所有服务的特征发现完毕事件
-        /// </summary>
+        public event Action<GattCharacteristic> CharacteristicAdded;
+        public event Action<GattCharacteristic, byte[]> WriteDataSuccess;
+        public event Action<GattCharacteristic, byte[]> ReceiveNotifyData;
         public event Action AllCharacteristicsDiscovered;
+        public event Action<string> ConnectionFailed;
 
-        /// <summary>
-        /// 当前连接的蓝牙Mac
-        /// </summary>
-        private string CurrentDeviceMAC { get; set; }
-
-
-        public BleCore()
+        private void Post(Action action)
         {
-            CharacteristicList = new List<GattCharacteristic>();
+            if (context != null) context.Post(_ => action(), null);
+            else action();
         }
-        /// <summary>
-        /// 获取发现的蓝牙设备
-        /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="args"></param>
-        private void DeviceWatcher_Added(DeviceWatcher sender, DeviceInformation args)
+
+        public Task DispatchAsync(Action action)
         {
-            Console.WriteLine("发现设备:" + args.Id + "Name:" + args.Name);
-            _deviceList.Add(args);
-            DeviceAdded?.Invoke(args);
-            //Console.WriteLine("Pairing:" + args.Pairing.IsPaired );
-            //if (args.Name.StartsWith("Progame.bleNameSuffix"))
-            //{
-            //    var res = BluetoothLEDevice.FromIdAsync(args.Id).Completed = (asyncInfo, asyncStatus) =>
-            //    {
-            //        if (asyncStatus == AsyncStatus.Completed)
-            //        {
-            //            Progame.ConnectDevice(asyncInfo.GetResults());
-            //            //GattCommunicationStatus a = asyncInfo.GetResults();
-            //            //Console.WriteLine("发送数据：" + BitConverter.ToString(data) + " State : " + a);
-            //            //Progame.sendOk = 1;
-            //        }
-            //    };
-            //}
-            //this.Matching(args.Id);
-        }
-        /// <summary>
-        /// 根据设备信息连接设备
-        /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="args"></param>
-        public void ConnectDeviceByInfo(DeviceInformation args)
-        {
-            Console.WriteLine("连接设备:" + args.Id + "Name:" + args.Name);
-            var res = BluetoothLEDevice.FromIdAsync(args.Id).Completed = (asyncInfo, asyncStatus) =>
+            var completion = new TaskCompletionSource<bool>();
+            Post(() =>
             {
-                if (asyncStatus == AsyncStatus.Completed)
-                {
-                    ConnectDevice(asyncInfo.GetResults());
-                }
-            };
-        }
-        private void ConnectDevice(BluetoothLEDevice Device)
-        {
-            // 取消订阅旧设备的事件
-            if (CurrentDevice != null)
-                CurrentDevice.ConnectionStatusChanged -= CurrentDevice_ConnectionStatusChanged;
-
-            // 重置特征引用
-            CurrentWriteCharacteristic = null;
-            CurrentDataCharacteristic = null;
-            CurrentNotifyCharacteristic = null;
-
-            CurrentDevice = Device;
-            CurrentDevice.ConnectionStatusChanged += CurrentDevice_ConnectionStatusChanged;
-            ConnectDeviceSuccess?.Invoke(Device);
-            FindService(CurrentDevice);
+                try { action(); completion.TrySetResult(true); }
+                catch (Exception ex) { completion.TrySetException(ex); }
+            });
+            return completion.Task;
         }
 
-        /// <summary>
-        /// 搜索蓝牙设备
-        /// </summary>
         public void StartBleDeviceWatcher()
         {
-            _deviceList = new List<DeviceInformation>();
-            // Start endless BLE device watcher
-            watcher = DeviceInformation.CreateWatcher(_aqsAllBLEDevices, _requestedBLEProperties, DeviceInformationKind.AssociationEndpoint);
-            watcher.Added += (DeviceWatcher sender, DeviceInformation devInfo) =>
+            StopBleDeviceWatcher();
+            devices.Clear();
+            var next = DeviceInformation.CreateWatcher(
+                "(System.Devices.Aep.ProtocolId:=\"{bb7bb05e-5972-42b5-94fc-76eaa7084d49}\")",
+                new[] { "System.Devices.Aep.DeviceAddress", "System.Devices.Aep.Bluetooth.Le.IsConnectable" },
+                DeviceInformationKind.AssociationEndpoint);
+            watcher = next;
+            next.Added += (sender, info) => Post(() =>
             {
-                if (_deviceList.FirstOrDefault(d => d.Id.Equals(devInfo.Id) || d.Name.Equals(devInfo.Name)) == null) _deviceList.Add(devInfo);
-            };
-            watcher.Updated += (_, __) => { }; // We need handler for this event, even an empty!
-            //Watch for a device being removed by the watcher
-            //watcher.Removed += (DeviceWatcher sender, DeviceInformationUpdate devInfo) =>
-            //{
-            //    _deviceList.Remove(FindKnownDevice(devInfo.Id));
-            //};
-            watcher.EnumerationCompleted += (DeviceWatcher sender, object arg) => { sender.Stop(); };
-            //watcher.Stopped += (DeviceWatcher sender, object arg) => { _deviceList.Clear(); sender.Start(); };
-            watcher.Stopped += (DeviceWatcher sender, object arg) => { };
-            watcher.Added += DeviceWatcher_Added;
-            watcher.Start();
-            Console.WriteLine("自动发现设备中..");
+                if (sender != watcher) return;
+                if (devices.All(d => d.Id != info.Id)) devices.Add(info);
+                DeviceAdded?.Invoke(info);
+            });
+            next.Updated += (sender, update) => Post(() =>
+            {
+                if (sender != watcher) return;
+                var info = devices.FirstOrDefault(d => d.Id == update.Id);
+                if (info == null) return;
+                info.Update(update);
+                DeviceAdded?.Invoke(info);
+            });
+            next.Removed += (sender, update) => Post(() =>
+            {
+                if (sender == watcher) devices.RemoveAll(d => d.Id == update.Id);
+            });
+            next.Start();
         }
 
-        /// <summary>
-        /// 停止搜索蓝牙
-        /// </summary>
+        public IReadOnlyList<DeviceInformation> GetDevices() => devices.ToArray();
+
         public void StopBleDeviceWatcher()
         {
-            watcher?.Stop();
+            var previous = watcher;
+            watcher = null; // Ignore callbacks already queued by an old scan.
+            if (previous != null && (previous.Status == DeviceWatcherStatus.Started
+                || previous.Status == DeviceWatcherStatus.EnumerationCompleted)) previous.Stop();
         }
 
-        /// <summary>
-        /// 主动断开连接
-        /// </summary>
-        /// <returns></returns>
+        public async void ConnectDeviceByInfo(DeviceInformation info)
+        {
+            if (IsConnecting || info == null) return;
+            Dispose();
+            IsConnecting = true;
+            int attempt = generation;
+            connectionCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            CancellationToken token = connectionCancellation.Token;
+            try
+            {
+                var device = await BluetoothLEDevice.FromIdAsync(info.Id).AsTask(token);
+                if (attempt != generation) { device?.Dispose(); return; }
+                if (device == null) throw new InvalidOperationException("open-device: unavailable or access denied");
+                CurrentDevice = device;
+                device.ConnectionStatusChanged += OnConnectionStatusChanged;
+                var openedSession = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId).AsTask(token);
+                if (attempt != generation) { openedSession?.Dispose(); return; }
+                session = openedSession;
+                // FromIdAsync only opens an object; it does not establish a BLE
+                // link. Keep the GATT session alive while discovering services.
+                if (session != null && session.CanMaintainConnection) session.MaintainConnection = true;
+                // MaintainConnection starts asynchronously. Retain the same
+                // session during transient Unreachable results instead of
+                // cancelling the connection request immediately on every retry.
+                // Reuse Windows' known service graph on reconnect. Readiness
+                // still requires live notification subscription and a live link.
+                var result = await device.GetGattServicesAsync(BluetoothCacheMode.Cached).AsTask(token);
+                for (int retry = 0; result.Status == GattCommunicationStatus.Unreachable && retry < 3; retry++)
+                {
+                    foreach (var unused in result.Services) unused.Dispose();
+                    await Task.Delay(1000 * (retry + 1), token);
+                    if (attempt != generation) return;
+                    result = await device.GetGattServicesAsync(BluetoothCacheMode.Uncached).AsTask(token);
+                }
+                if (attempt != generation)
+                {
+                    foreach (var stale in result.Services) stale.Dispose();
+                    return;
+                }
+                if (result.Status != GattCommunicationStatus.Success)
+                    throw new InvalidOperationException("discover-services: " + result.Status);
+                services.AddRange(result.Services);
+                GattCommunicationStatus? characteristicFailure = null;
+                foreach (var service in services.ToArray())
+                {
+                    var chars = await service.GetCharacteristicsAsync(BluetoothCacheMode.Cached).AsTask(token);
+                    if (chars.Status != GattCommunicationStatus.Success || chars.Characteristics.Count == 0)
+                        chars = await service.GetCharacteristicsAsync(BluetoothCacheMode.Uncached).AsTask(token);
+                    if (attempt != generation) return;
+                    if (chars.Status != GattCommunicationStatus.Success)
+                    {
+                        characteristicFailure = chars.Status;
+                        continue;
+                    }
+                    foreach (var c in chars.Characteristics)
+                    {
+                        CharacteristicList.Add(c);
+                        switch (Utilities.ConvertUuidToShortId(c.Uuid))
+                        {
+                            case 0x7341: CurrentDataCharacteristic = c; break;
+                            case 0x7343: CurrentWriteCharacteristic = c; break;
+                            case 0x7344: CurrentNotifyCharacteristic = c; break;
+                        }
+                    }
+                }
+                if (CurrentDataCharacteristic == null || CurrentWriteCharacteristic == null || CurrentNotifyCharacteristic == null)
+                    throw new InvalidOperationException(characteristicFailure.HasValue
+                        ? "discover-characteristics: " + characteristicFailure.Value
+                        : "discover-characteristics: required AhaKey characteristics missing");
+                var notify = CurrentNotifyCharacteristic;
+                var notificationStatus = await notify.WriteClientCharacteristicConfigurationDescriptorAsync(
+                    GattClientCharacteristicConfigurationDescriptorValue.Notify).AsTask(token);
+                for (int retry = 0; notificationStatus == GattCommunicationStatus.Unreachable && retry < 3; retry++)
+                {
+                    await Task.Delay(1000 * (retry + 1), token);
+                    if (attempt != generation) return;
+                    notificationStatus = await notify.WriteClientCharacteristicConfigurationDescriptorAsync(
+                        GattClientCharacteristicConfigurationDescriptorValue.Notify).AsTask(token);
+                }
+                if (attempt != generation) return;
+                if (notificationStatus != GattCommunicationStatus.Success)
+                    throw new InvalidOperationException("enable-notifications: " + notificationStatus);
+                notify.ValueChanged += OnValueChanged;
+                notificationsReady = true;
+                IsConnecting = false;
+                ConnectDeviceSuccess?.Invoke(device);
+                foreach (var c in CharacteristicList) CharacteristicAdded?.Invoke(c);
+                AllCharacteristicsDiscovered?.Invoke();
+            }
+            catch (Exception error)
+            {
+                if (attempt != generation) return;
+                // Only stage names/status codes are exposed; never Windows IDs,
+                // device addresses, or exception messages from native APIs.
+                string reason = error is InvalidOperationException && error.Message.StartsWith("discover-")
+                    || error is InvalidOperationException && error.Message.StartsWith("enable-notifications:")
+                    || error is InvalidOperationException && error.Message.StartsWith("open-device:")
+                    ? error.Message : error is OperationCanceledException ? "connect: timed out" : "connect: failed (" + error.GetType().Name + ")";
+                Dispose();
+                ConnectionFailed?.Invoke(reason);
+            }
+            finally
+            {
+                if (attempt == generation)
+                {
+                    IsConnecting = false;
+                    connectionCancellation?.Dispose();
+                    connectionCancellation = null;
+                }
+            }
+        }
+
+        private void OnConnectionStatusChanged(BluetoothLEDevice sender, object args) => Post(() =>
+        {
+            if (sender != CurrentDevice || IsConnecting) return;
+            if (sender.ConnectionStatus == BluetoothConnectionStatus.Disconnected)
+            {
+                DeviceDisconnected?.Invoke(sender);
+                Dispose();
+            }
+        });
+
+        private void OnValueChanged(GattCharacteristic sender, GattValueChangedEventArgs args)
+        {
+            byte[] bytes;
+            CryptographicBuffer.CopyToByteArray(args.CharacteristicValue, out bytes);
+            Post(() => { if (sender == CurrentNotifyCharacteristic && notificationsReady) ReceiveNotifyData?.Invoke(sender, bytes); });
+        }
+
+        // Kept for the optional legacy diagnostics form. Subscription now
+        // belongs to connection establishment and is enabled exactly once.
+        public void EnableNotifications(GattCharacteristic characteristic) { }
+
+        public void WriteDataToCharacterstuc(GattCharacteristic c, byte[] data)
+        {
+            if (c == null || data == null || data.Length == 0) return;
+            Post(async () =>
+            {
+                int attempt = generation;
+                await writes.WaitAsync();
+                try
+                {
+                    if (attempt != generation || !IsReady) return;
+                    var result = await c.WriteValueAsync(CryptographicBuffer.CreateFromByteArray(data), GattWriteOption.WriteWithResponse);
+                    if (attempt == generation && result == GattCommunicationStatus.Success) WriteDataSuccess?.Invoke(c, data);
+                }
+                catch { /* A disconnected write must not terminate the host. */ }
+                finally { writes.Release(); }
+            });
+        }
+
         public void Dispose()
         {
-            CurrentDeviceMAC = null;
-            if (CurrentDevice != null)
-                CurrentDevice.ConnectionStatusChanged -= CurrentDevice_ConnectionStatusChanged;
-            CurrentService?.Dispose();
-            CurrentDevice?.Dispose();
-            CurrentDevice = null;
-            CurrentService = null;
+            generation++;
+            IsConnecting = false;
+            connectionCancellation?.Cancel();
+            connectionCancellation?.Dispose();
+            connectionCancellation = null;
+            notificationsReady = false;
+            if (CurrentNotifyCharacteristic != null) CurrentNotifyCharacteristic.ValueChanged -= OnValueChanged;
+            if (CurrentDevice != null) CurrentDevice.ConnectionStatusChanged -= OnConnectionStatusChanged;
             CurrentWriteCharacteristic = null;
             CurrentDataCharacteristic = null;
             CurrentNotifyCharacteristic = null;
-            Console.WriteLine("主动断开连接");
-        }
-
-        /// <summary>
-        /// 匹配
-        /// </summary>
-        /// <param name="Device"></param>
-        public void StartMatching(BluetoothLEDevice Device)
-        {
-            this.CurrentDevice = Device;
-        }
-
-        /// <summary>
-        /// 发送数据接口
-        /// </summary>
-        /// <returns></returns>
-        public void Write(byte[] data)
-        {
-            if (CurrentWriteCharacteristic != null)
+            CharacteristicList.Clear();
+            if (session != null)
             {
-                CurrentWriteCharacteristic.WriteValueAsync(CryptographicBuffer.CreateFromByteArray(data), GattWriteOption.WriteWithResponse).Completed = (asyncInfo, asyncStatus) =>
-                {
-                    if (asyncStatus == AsyncStatus.Completed)
-                    {
-                        GattCommunicationStatus a = asyncInfo.GetResults();
-                        Console.WriteLine("发送数据：" + BitConverter.ToString(data) + " State : " + a);
-                        WriteDataSuccess?.Invoke(CurrentWriteCharacteristic, data);
-                    }
-                    else
-                    {
-                        Console.WriteLine("ERROR");
-                    }
-                };
+                try { session.MaintainConnection = false; } catch { }
+                try { session.Dispose(); } catch { }
+                session = null;
             }
-            else
-            {
-                Console.WriteLine("当前没有设置写服务特征");
-            }
-
-        }
-        /// <summary>
-        /// 发送数据接口
-        /// </summary>
-        /// <returns></returns>
-        public void WriteDataToCharacterstuc(GattCharacteristic c, byte[] data)
-        {
-            if (c != null)
-            {
-                c.WriteValueAsync(CryptographicBuffer.CreateFromByteArray(data), GattWriteOption.WriteWithResponse).Completed = (asyncInfo, asyncStatus) =>
-                {
-                    if (asyncStatus == AsyncStatus.Completed)
-                    {
-                        GattCommunicationStatus a = asyncInfo.GetResults();
-                        Console.WriteLine("发送数据：" + BitConverter.ToString(data) + " State : " + a);
-                        WriteDataSuccess?.Invoke(c, data);
-                    }
-                };
-            }
-            else
-            {
-                Console.WriteLine("当前没有设置写服务特征");
-            }
-
-        }
-        public void ReadDataFromCharacterstuc(GattCharacteristic c)
-        {
-            if (c != null)
-            {
-                c.ReadValueAsync(BluetoothCacheMode.Uncached).Completed = (asyncInfo, asyncStatus) =>
-                {
-                    if (asyncStatus == AsyncStatus.Completed)
-                    {
-                        //var a = asyncInfo.GetResults();
-                        var test = asyncInfo.GetResults().Value;
-                        byte[] data;
-                        CryptographicBuffer.CopyToByteArray(test, out data);
-                        Console.WriteLine("读取数据：" + BitConverter.ToString(data) + " State : " + asyncInfo.GetResults());
-                        ReadDataSuccess?.Invoke(c, data);
-                    }
-                };
-            }
-            else
-            {
-                Console.WriteLine("当前没有设置写服务特征");
-            }
-
-        }
-        /// <summary>
-        /// 获取蓝牙服务
-        /// </summary>
-        public void FindService(BluetoothLEDevice dev)
-        {
-            if (dev != null)
-            {
-                dev.GetGattServicesAsync(BluetoothCacheMode.Uncached).Completed = (asyncInfo, asyncStatus) =>
-                {
-                    if (asyncStatus == AsyncStatus.Completed)
-                    {
-                        var services = asyncInfo.GetResults().Services;
-                        Console.WriteLine("GattServices size=" + services.Count);
-                        CharacteristicList.Clear();
-
-                        for (int i = 0; i < services.Count; i++)
-                        {
-                            Console.WriteLine($"#{i:00}: {services[i].Uuid.ToString()}");
-                        }
-
-                        _pendingServiceCount = services.Count;
-                        if (_pendingServiceCount == 0)
-                        {
-                            AllCharacteristicsDiscovered?.Invoke();
-                        }
-                        else
-                        {
-                            foreach (GattDeviceService ser in services)
-                            {
-                                FindCharacteristic(ser);
-                            }
-                        }
-                        CharacteristicFinish?.Invoke(services.Count);
-                    }
-                };
-            }
-            else
-            {
-                Console.WriteLine("当前没有打开设备");
-            }
-
-        }
-
-        /// <summary>
-        /// 按MAC地址直接组装设备ID查找设备
-        /// </summary>
-        public void SelectDeviceFromIdAsync(string MAC)
-        {
-            CurrentDeviceMAC = MAC;
+            foreach (var service in services) { try { service.Dispose(); } catch { } }
+            services.Clear();
+            try { CurrentDevice?.Dispose(); } catch { }
             CurrentDevice = null;
-            BluetoothAdapter.GetDefaultAsync().Completed = (asyncInfo, asyncStatus) =>
-            {
-                if (asyncStatus == AsyncStatus.Completed)
-                {
-                    BluetoothAdapter mBluetoothAdapter = asyncInfo.GetResults();
-                    byte[] _Bytes1 = BitConverter.GetBytes(mBluetoothAdapter.BluetoothAddress);//ulong转换为byte数组
-                    Array.Reverse(_Bytes1);
-                    string macAddress = BitConverter.ToString(_Bytes1, 2, 6).Replace('-', ':').ToLower();
-                    string Id = "BluetoothLE#BluetoothLE" + macAddress + "-" + MAC;
-                    Matching(Id);
-                }
-            };
         }
-
-        /// <summary>
-        /// 获取操作
-        /// </summary>
-        /// <returns></returns>
-        public void SetOpteron(GattCharacteristic gattCharacteristic)
-        {
-            byte[] _Bytes1 = BitConverter.GetBytes(this.CurrentDevice.BluetoothAddress);
-            Array.Reverse(_Bytes1);
-            this.CurrentDeviceMAC = BitConverter.ToString(_Bytes1, 2, 6).Replace('-', ':').ToLower();
-
-            string msg = "正在连接设备<" + this.CurrentDeviceMAC + ">..";
-            Console.WriteLine(msg);
-
-            if (gattCharacteristic.CharacteristicProperties == GattCharacteristicProperties.Write)
-            {
-                this.CurrentWriteCharacteristic = gattCharacteristic;
-            }
-            if (gattCharacteristic.CharacteristicProperties == GattCharacteristicProperties.Notify)
-            {
-                this.CurrentNotifyCharacteristic = gattCharacteristic;
-            }
-            if ((uint)gattCharacteristic.CharacteristicProperties == 26)
-            {
-
-            }
-
-            if (gattCharacteristic.CharacteristicProperties == (GattCharacteristicProperties.Write | GattCharacteristicProperties.Notify))
-            {
-                this.CurrentWriteCharacteristic = gattCharacteristic;
-                this.CurrentNotifyCharacteristic = gattCharacteristic;
-                this.CurrentNotifyCharacteristic.ProtectionLevel = GattProtectionLevel.Plain;
-                this.CurrentNotifyCharacteristic.ValueChanged += Characteristic_ValueChanged;
-                this.CurrentDevice.ConnectionStatusChanged += this.CurrentDevice_ConnectionStatusChanged;
-                this.EnableNotifications(CurrentNotifyCharacteristic);
-            }
-
-        }
-
-        //private void OnAdvertisementReceived(BluetoothLEAdvertisementWatcher watcher, BluetoothLEAdvertisementReceivedEventArgs eventArgs)
-        //{
-        //    BluetoothLEDevice.FromBluetoothAddressAsync(eventArgs.BluetoothAddress).Completed = (asyncInfo, asyncStatus) =>
-        //    {
-        //        if (asyncStatus == AsyncStatus.Completed)
-        //        {
-        //            if (asyncInfo.GetResults() == null)
-        //            {
-        //                //Console.WriteLine("没有得到结果集");
-        //            }
-        //            else
-        //            {
-        //                BluetoothLEDevice currentDevice = asyncInfo.GetResults();
-
-        //                if (DeviceList.FindIndex((x) => { return x.Name.Equals(currentDevice.Name); }) < 0)
-        //                {
-        //                    this.DeviceList.Add(currentDevice);
-        //                    DeviceWatcherChanged?.Invoke(currentDevice);
-        //                }
-
-        //            }
-
-        //        }
-        //    };
-        //}
-
-        /// <summary>
-        /// 获取特性
-        /// </summary>
-        private void FindCharacteristic(GattDeviceService gattDeviceService)
-        {
-            this.CurrentService = gattDeviceService;
-            this.CurrentService.GetCharacteristicsAsync(BluetoothCacheMode.Uncached).Completed = (asyncInfo, asyncStatus) =>
-            {
-                if (asyncStatus == AsyncStatus.Completed)
-                {
-                    var characteristics = asyncInfo.GetResults().Characteristics;
-                    foreach (var c in characteristics)
-                    {
-                        CharacteristicList.Add(c);
-                        this.CharacteristicAdded?.Invoke(c);
-                    }
-                }
-
-                if (Interlocked.Decrement(ref _pendingServiceCount) == 0)
-                    AllCharacteristicsDiscovered?.Invoke();
-            };
-        }
-
-        /// <summary>
-        /// 搜索到的蓝牙设备
-        /// </summary>
-        /// <returns></returns>
-        private void Matching(string Id)
-        {
-            try
-            {
-                BluetoothLEDevice.FromIdAsync(Id).Completed = (asyncInfo, asyncStatus) =>
-                {
-                    if (asyncStatus == AsyncStatus.Completed)
-                    {
-                        BluetoothLEDevice bleDevice = asyncInfo.GetResults();
-                        //this.DeviceList.Add(bleDevice);
-                        Console.WriteLine(bleDevice);
-                    }
-
-                    if (asyncStatus == AsyncStatus.Started)
-                    {
-                        Console.WriteLine(asyncStatus.ToString());
-                    }
-                    if (asyncStatus == AsyncStatus.Canceled)
-                    {
-                        Console.WriteLine(asyncStatus.ToString());
-                    }
-                    if (asyncStatus == AsyncStatus.Error)
-                    {
-                        Console.WriteLine(asyncStatus.ToString());
-                    }
-                };
-            }
-            catch (Exception e)
-            {
-                string msg = "没有发现设备" + e.ToString();
-                Console.WriteLine(msg);
-                this.StartBleDeviceWatcher();
-            }
-        }
-
-
-        private void CurrentDevice_ConnectionStatusChanged(BluetoothLEDevice sender, object args)
-        {
-            if (sender.ConnectionStatus == BluetoothConnectionStatus.Disconnected)
-            {
-                Console.WriteLine("设备已断开");
-                DeviceDisconnected?.Invoke(sender);
-            }
-            else
-            {
-                Console.WriteLine("设备已连接");
-            }
-        }
-
-        /// <summary>
-        /// 设置特征对象为接收通知对象
-        /// </summary>
-        /// <param name="characteristic"></param>
-        /// <returns></returns>
-        public void EnableNotifications(GattCharacteristic characteristic)
-        {
-            Console.WriteLine("收通知对象=" + CurrentDevice.Name + ":" + CurrentDevice.ConnectionStatus);
-            characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(CHARACTERISTIC_NOTIFICATION_TYPE).Completed = (asyncInfo, asyncStatus) =>
-            {
-                if (asyncStatus == AsyncStatus.Completed)
-                {
-                    GattCommunicationStatus status = asyncInfo.GetResults();
-                    if (status == GattCommunicationStatus.Unreachable)
-                    {
-                        Console.WriteLine("设备不可用");
-                        if (CurrentNotifyCharacteristic != null && !asyncLock)
-                        {
-                            this.EnableNotifications(CurrentNotifyCharacteristic);
-                        }
-                        return;
-                    }
-                    else
-                    {
-                        CurrentNotifyCharacteristic.ValueChanged += Characteristic_ValueChanged;
-                    }
-                    asyncLock = false;
-                    Console.WriteLine("设备连接状态" + status);
-                }
-            };
-        }
-
-        /// <summary>
-        /// 接受到蓝牙数据
-        /// </summary>
-        private void Characteristic_ValueChanged(GattCharacteristic sender, GattValueChangedEventArgs args)
-        {
-            byte[] data;
-            CryptographicBuffer.CopyToByteArray(args.CharacteristicValue, out data);
-            ReceiveNotifyData?.Invoke(sender, data);
-        }
-
     }
 
-    class Utilities
+    static class Utilities
     {
-        /// <summary>
-        ///     Converts from standard 128bit UUID to the assigned 32bit UUIDs. Makes it easy to compare services
-        ///     that devices expose to the standard list.
-        /// </summary>
-        /// <param name="uuid">UUID to convert to 32 bit</param>
-        /// <returns></returns>
         public static ushort ConvertUuidToShortId(Guid uuid)
         {
-            // Get the short Uuid
             var bytes = uuid.ToByteArray();
-            var shortUuid = (ushort)(bytes[0] | (bytes[1] << 8));
-            return shortUuid;
+            return (ushort)(bytes[0] | (bytes[1] << 8));
         }
-
-        /// <summary>
-        ///     Converts from a buffer to a properly sized byte array
-        /// </summary>
-        /// <param name="buffer"></param>
-        /// <returns></returns>
         public static byte[] ReadBufferToBytes(IBuffer buffer)
         {
-            var dataLength = buffer.Length;
-            var data = new byte[dataLength];
-            using (var reader = DataReader.FromBuffer(buffer))
-            {
-                reader.ReadBytes(data);
-            }
+            var data = new byte[buffer.Length];
+            using (var reader = DataReader.FromBuffer(buffer)) reader.ReadBytes(data);
             return data;
         }
-
     }
 
     internal static class Program
     {
-
-        /// <summary>
-        /// 应用程序的主入口点。
-        /// </summary>
         [STAThread]
-        static void Main()
+        static int Main(string[] args)
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new Form1());
+            // Install a message-loop context without creating a Form or tray.
+            SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+            if (args.Any(a => a.Equals("--headless", StringComparison.OrdinalIgnoreCase)))
+            {
+                try { using (var host = new BridgeHost(args)) Application.Run(host); }
+                catch { return 1; }
+            }
+            else Application.Run(new Form1());
+            return 0;
         }
     }
 }

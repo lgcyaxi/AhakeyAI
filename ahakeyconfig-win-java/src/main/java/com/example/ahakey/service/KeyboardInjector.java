@@ -36,7 +36,7 @@ public class KeyboardInjector {
             return;
         }
         
-        logger.debug("KeyboardInjector - 开始注入文本: \"{}\"", text);
+        logger.debug("KeyboardInjector - preparing {} characters", text.length());
         
         // 保存当前键盘状态（CapsLock、NumLock等）
         boolean originalCapsLock = isKeyPressed(VK_CAPITAL);
@@ -61,7 +61,7 @@ public class KeyboardInjector {
             char[] windowTitle = new char[256];
             user32.GetWindowText(foregroundWindow, windowTitle, 256);
             String activeWindowTitle = Native.toString(windowTitle);
-            logger.debug("KeyboardInjector - 当前活动窗口: {}", activeWindowTitle);
+            logger.debug("KeyboardInjector - target window resolved");
             
             // 逐个字符发送
             for (char c : text.toCharArray()) {

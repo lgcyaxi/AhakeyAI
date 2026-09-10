@@ -2,7 +2,7 @@
 
 # ⌨️ AhaKey Desktop
 
-**The official cross-platform desktop suite for the AhaKey-X1 — the Vibecoding Keyboard.**
+**A community fork of the AhaKey-X1 desktop suite, with an additional Rust client.**
 
 [**English**](README.md) &nbsp;·&nbsp; [**简体中文**](docs/zh/README.md)
 
@@ -27,6 +27,23 @@
 <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+">
 
 </div>
+
+## Community Rust client and firmware
+
+[AhaKey Studio 1.1.5](ahakey-desktop/README.md) is a standalone Rust/Tauri 2
+client. [Community releases](https://github.com/lgcyaxi/AhakeyAI/releases/tag/ahakey-studio-1.1.5)
+provide the Windows x64 package and **unofficial experimental AhaKey X1
+firmware 0.1.17**. macOS packaging is a separate native validation step.
+The firmware adds dual BLE plus USB routing, bonded reconnect recovery and
+battery-only display/light standby. Flashing can interrupt input, lose pairing
+or require recovery; read the [compatibility, risks and permission](ahakey-desktop/FIRMWARE.md)
+before use. Firmware and client versions are independent.
+
+Hardware and the original desktop suite are by [AhaKey](https://github.com/AhakeyAI).
+The firmware binary is distributed for personal, noncommercial research under
+[AhaKey's explicit permission](https://github.com/AhakeyAI/desktop/issues/63#issuecomment-5653215712),
+not as an official firmware release or a publication of controlled source.
+The upstream links below describe the original suite.
 
 ## <div align="center">Overview</div>
 

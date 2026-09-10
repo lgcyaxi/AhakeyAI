@@ -8,23 +8,22 @@ import com.example.ahakey.view.CanvasPane;
 import com.example.ahakey.view.InspectorPane;
 import com.example.ahakey.view.StatusBar;
 import com.example.ahakey.view.TopBar;
-import javafx.animation.PauseTransition;
-import javafx.util.Duration;
 import javafx.application.Application;
 import javafx.application.Platform;
-import javafx.beans.binding.Bindings;
-import javafx.geometry.Rectangle2D;
 import javafx.scene.Scene;
-import javafx.scene.control.ScrollPane;
+import javafx.scene.control.Alert;
 import javafx.scene.image.Image;
 import javafx.scene.layout.BorderPane;
-import javafx.scene.layout.HBox;
-import javafx.scene.layout.Priority;
-import javafx.scene.layout.Region;
-import javafx.stage.Screen;
 import javafx.stage.Stage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 
 /**
  * AhaKey Studio 主应用类
@@ -57,7 +56,11 @@ public class App extends Application {
      * 语音输入管理器，负责管理语音识别和键盘注入功能
      */
     private VoiceInputManager voiceInputManager;
+    private TopBar topBar;
+    private com.example.ahakey.view.StudioShell shell;
     private boolean shuttingDown;
+    private FileChannel instanceChannel;
+    private FileLock instanceLock;
 
     /**
      * JavaFX 应用的核心方法，负责初始化和显示主界面
@@ -65,18 +68,18 @@ public class App extends Application {
      */
     @Override
     public void start(Stage primaryStage) {
+        if (!acquireInstanceLock()) {
+            Platform.exit();
+            return;
+        }
         // 1. 创建主控制器，作为整个应用的核心协调者
         controller = new StudioController();
         
         // 2. 条件初始化语音输入管理器（根据 model.enabled 配置）
-        if (com.example.ahakey.config.ModelConfig.getInstance().isEnabled()) {
-            initVoiceInputManager();
-        } else {
-            logger.info("本地模型已禁用 (model.enabled=false)，跳过语音输入初始化");
-        }
+        initVoiceInputManager();
         
         // 2. 配置主窗口（Stage）属性
-        primaryStage.setTitle("AhaKey Studio");      // 窗口标题
+        primaryStage.setTitle("AhaKey Studio 1.1.1 · JavaFX");
         primaryStage.setMinWidth(800);              // 最小宽度（分屏/多屏适配）
         primaryStage.setMinHeight(600);              // 最小高度
         primaryStage.setWidth(1280);                 // 默认宽度
@@ -92,7 +95,7 @@ public class App extends Application {
         // 4. 创建各个 UI 组件
         
         // TopBar（顶部导航栏）：包含连接状态、模式选择、AhaType开关等
-        TopBar topBar = new TopBar(
+        topBar = new TopBar(
             controller, 
             controller.getDeviceStatus(), 
             controller.getStudioState(), 
@@ -104,39 +107,10 @@ public class App extends Application {
             topBar.setVoiceInputManager(voiceInputManager);
         }
         
-        // 中间区域：使用 HBox 水平排列两个面板
-        HBox centerPane = new HBox();
-        centerPane.getStyleClass().add("workspace");
-        centerPane.setMinWidth(Region.USE_PREF_SIZE); // HBox 不缩小，由外层 ScrollPane 处理溢出
-        
-        // CanvasPane（画布面板）：显示键盘布局预览
+        // Reflow by logical width; the device page owns vertical scrolling.
         CanvasPane canvasPane = new CanvasPane(controller);
-        HBox.setHgrow(canvasPane, Priority.ALWAYS);
-        
-        // InspectorPane（检查器面板）：显示当前选中按键的详细配置
         InspectorPane inspectorPane = new InspectorPane(controller);
-        HBox.setHgrow(inspectorPane, Priority.NEVER);
-        
-        // 将两个面板添加到水平容器中
-        centerPane.getChildren().addAll(canvasPane, inspectorPane);
-        
-        // 包裹在 ScrollPane 中：跨屏幕拖拽时 DPI 变化不会导致变形
-        ScrollPane centerScroll = new ScrollPane(centerPane);
-        centerScroll.setFitToWidth(true);
-        centerScroll.setFitToHeight(true);
-        centerScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
-        centerScroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
-        centerScroll.setPannable(false);
-        centerScroll.setStyle("-fx-background: transparent; -fx-background-color: transparent;");
-
-        canvasPane.prefWidthProperty().bind(Bindings.createDoubleBinding(
-            () -> Math.max(460, centerScroll.getViewportBounds().getWidth() * 0.52),
-            centerScroll.viewportBoundsProperty()
-        ));
-        inspectorPane.prefWidthProperty().bind(Bindings.createDoubleBinding(
-            () -> Math.max(520, centerScroll.getViewportBounds().getWidth() * 0.48),
-            centerScroll.viewportBoundsProperty()
-        ));
+        var deviceEditor = CanvasPane.createWorkspace(canvasPane, inspectorPane);
         
         // StatusBar（底部状态栏）：显示同步状态、连接状态等
         StatusBar statusBar = new StatusBar(
@@ -146,7 +120,8 @@ public class App extends Application {
 
         // 5. 将组件组装到根布局中
         root.setTop(topBar);        // 顶部：导航栏
-        root.setCenter(centerScroll); // 中间：工作区（画布 + 检查器，可滚动）
+        shell = new com.example.ahakey.view.StudioShell(controller, topBar, deviceEditor, voiceInputManager);
+        root.setCenter(shell);
         root.setBottom(statusBar);  // 底部：状态栏
 
         // 6. 创建场景（Scene）并设置样式
@@ -167,49 +142,13 @@ public class App extends Application {
             }
         });
 
-        // 8. 跨屏幕拖拽防护：记住高分屏窗口尺寸，拖回来时自动恢复
-        // 问题场景：2880x1800(高DPI) → 1920x1080(低DPI) → 2880x1800，窗口被压缩无法恢复
-        final double[] savedSize = {1280, 820}; // 保存高分屏的窗口尺寸
-        final double[] lastScreenDpi = {0};     // 上次所在屏幕的 DPI
-
-        PauseTransition layoutRefresh = new PauseTransition(Duration.millis(500));
-        layoutRefresh.setOnFinished(e -> Platform.runLater(() -> {
-            // 检测当前屏幕 DPI
-            double currentDpi = getCurrentScreenDpi(primaryStage);
-            
-            if (lastScreenDpi[0] > 0 && currentDpi > lastScreenDpi[0] * 1.1) {
-                // 从低DPI屏回到了高DPI屏，恢复保存的窗口尺寸
-                logger.debug("检测到低DPI→高DPI切换 ({}→{})，恢复窗口尺寸 {}x{}",
-                    (int) lastScreenDpi[0], (int) currentDpi, (int) savedSize[0], (int) savedSize[1]);
-                primaryStage.setWidth(savedSize[0]);
-                primaryStage.setHeight(savedSize[1]);
-            }
-            
-            // 保存当前尺寸（如果窗口在高分屏上且尺寸足够大）
-            if (currentDpi >= 120 || primaryStage.getWidth() >= 1100) {
-                savedSize[0] = primaryStage.getWidth();
-                savedSize[1] = primaryStage.getHeight();
-            }
-            
-            lastScreenDpi[0] = currentDpi;
-            
-            // 强制刷新布局
-            root.applyCss();
-            root.requestLayout();
-        }));
-
-        // 监听窗口位置和尺寸变化
-        javafx.beans.value.ChangeListener<Number> posSizeListener = (obs, old, val) -> {
-            layoutRefresh.stop();
-            layoutRefresh.playFromStart();
-        };
-        primaryStage.xProperty().addListener(posSizeListener);
-        primaryStage.yProperty().addListener(posSizeListener);
-        primaryStage.widthProperty().addListener(posSizeListener);
-        primaryStage.heightProperty().addListener(posSizeListener);
+        // JavaFX already lays out in logical pixels and refreshes output scale across monitors.
+        // Do not restore a saved physical-DPI size over the user's current window geometry.
 
         // 8. 显示窗口
         primaryStage.show();
+        com.example.ahakey.view.FloatingVoiceNotification.installScreenTracking();
+        topBar.startBundledBleDriver();
         
         // 9. 设置窗口关闭时的清理逻辑
         // 类比于 Web 中的 beforeunload 事件
@@ -229,6 +168,7 @@ public class App extends Application {
         }
         shuttingDown = true;
         try {
+            if (shell != null) shell.close();
             shutdownVoiceInputManager();
             if (controller != null) {
                 controller.shutdown();
@@ -236,7 +176,15 @@ public class App extends Application {
         } catch (Exception e) {
             logger.warn("Application shutdown cleanup failed: {}", e.getMessage());
         } finally {
+            try {
+                if (topBar != null) {
+                    topBar.shutdown();
+                }
+            } catch (Exception e) {
+                logger.warn("Top bar shutdown cleanup failed: {}", e.getMessage());
+            }
             Platform.exit();
+            releaseInstanceLock();
             System.exit(0);
         }
     }
@@ -249,12 +197,20 @@ public class App extends Application {
         try {
             voiceInputManager = new VoiceInputManager();
             voiceInputManager.initialize();
+
+            if (!voiceInputManager.isEnabled()) {
+                logger.warn(
+                    "本地语音服务不可用: {}",
+                    voiceInputManager.getAvailabilityMessage()
+                );
+            }
             
             // 配置语音键回调：按下开始录音，释放停止录音
             if (WindowsVoiceTyping.isWindows()) {
                 WindowsVoiceRelayService relay = WindowsVoiceRelayService.getInstance();
                 relay.setOnVoiceKeyDown(() -> {
                     if (voiceInputManager != null && voiceInputManager.isActivated()) {
+                        if (topBar != null) topBar.prepareCaptionForUtterance();
                         voiceInputManager.startRecording();
                     }
                 });
@@ -266,6 +222,7 @@ public class App extends Application {
                 // 配置模拟录音回调（用于模拟按钮直接触发录音）
                 relay.setOnSimulateRecordStart(() -> {
                     if (voiceInputManager != null && voiceInputManager.isActivated()) {
+                        if (topBar != null) topBar.prepareCaptionForUtterance();
                         voiceInputManager.startRecording();
                     }
                 });
@@ -274,9 +231,12 @@ public class App extends Application {
                         voiceInputManager.stopRecording();
                     }
                 });
+                relay.setLocalVoiceRecordingSupplier(() ->
+                    voiceInputManager != null && voiceInputManager.isRecording()
+                );
             }
             
-            logger.info("语音输入管理器初始化成功");
+            logger.info("语音输入管理器初始化成功，等待用户点击“启动语音输入”");
         } catch (Exception e) {
             logger.error("语音输入管理器初始化失败: {}", e.getMessage());
             // 语音输入功能不可用，但不影响主应用运行
@@ -310,21 +270,45 @@ public class App extends Application {
         launch(args);
     }
     
-    /**
-     * 获取窗口当前所在屏幕的 DPI
-     * 通过比较窗口中心点与各屏幕边界来确定当前屏幕
-     */
-    private double getCurrentScreenDpi(Stage stage) {
-        double centerX = stage.getX() + stage.getWidth() / 2;
-        double centerY = stage.getY() + stage.getHeight() / 2;
-        
-        for (Screen screen : Screen.getScreens()) {
-            Rectangle2D bounds = screen.getBounds();
-            if (bounds.contains(centerX, centerY)) {
-                return screen.getDpi();
+    private boolean acquireInstanceLock() {
+        try {
+            Path directory = Path.of(System.getProperty("user.home"), ".ahakey");
+            Files.createDirectories(directory);
+            instanceChannel = FileChannel.open(directory.resolve("studio-instance.lock"),
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+            try {
+                instanceLock = instanceChannel.tryLock();
+            } catch (OverlappingFileLockException alreadyLocked) {
+                instanceLock = null;
             }
+            if (instanceLock != null) return true;
+            releaseInstanceLock();
+            showStartupNotice("AhaKey Studio 已经在运行", "请使用已打开的窗口；如需切换版本，请先退出当前版本。");
+        } catch (IOException error) {
+            releaseInstanceLock();
+            logger.warn("Cannot acquire application instance lock", error);
+            showStartupNotice("无法启动 AhaKey Studio", "无法访问本机应用锁。请检查用户配置目录的访问权限后重试。");
         }
-        // 回退：使用主屏幕 DPI
-        return Screen.getPrimary().getDpi();
+        return false;
+    }
+
+    private void releaseInstanceLock() {
+        try {
+            if (instanceLock != null) instanceLock.release();
+            if (instanceChannel != null) instanceChannel.close();
+        } catch (IOException error) {
+            logger.warn("Cannot release application instance lock", error);
+        } finally {
+            instanceLock = null;
+            instanceChannel = null;
+        }
+    }
+
+    private static void showStartupNotice(String title, String detail) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle("AhaKey Studio");
+        alert.setHeaderText(title);
+        alert.setContentText(detail);
+        alert.showAndWait();
     }
 }

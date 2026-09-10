@@ -11,6 +11,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  agent-docs:
+    name: Agent docs · public boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate public agent documentation
+        run: python3 scripts/check_agent_docs.py
+
   typescript-sdk:
     name: TypeScript SDK · test + build
     runs-on: ubuntu-latest

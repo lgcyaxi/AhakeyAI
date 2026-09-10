@@ -5,28 +5,38 @@ import com.example.ahakey.model.DeviceStatus;
 import com.example.ahakey.model.ModeSlot;
 import com.example.ahakey.model.StudioState;
 import javafx.fxml.FXMLLoader;
+import javafx.beans.binding.Bindings;
 import javafx.geometry.Insets;
-import javafx.geometry.Pos;
+import javafx.geometry.VPos;
 import javafx.scene.control.Label;
 import javafx.scene.control.ToggleButton;
-import javafx.scene.layout.HBox;
+import javafx.scene.layout.ColumnConstraints;
+import javafx.scene.layout.FlowPane;
+import javafx.scene.layout.GridPane;
 import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.util.function.Consumer;
 
 public class CanvasPane extends VBox {
     private final StudioState studioState;
     private final DeviceStatus deviceStatus;
-    private final StudioController controller;
+    private final Consumer<ModeSlot> selectMode;
 
     private final Label modeGuidance = new Label();
 
     public CanvasPane(StudioController controller) {
-        this.studioState = controller.getStudioState();
-        this.deviceStatus = controller.getDeviceStatus();
-        this.controller = controller;
+        this(controller.getStudioState(), controller.getDeviceStatus(), controller::selectKeyboardMode);
+    }
+
+    CanvasPane(StudioState studioState, DeviceStatus deviceStatus, Consumer<ModeSlot> selectMode) {
+        this.studioState = studioState;
+        this.deviceStatus = deviceStatus;
+        this.selectMode = selectMode;
         init();
     }
 
@@ -34,9 +44,9 @@ public class CanvasPane extends VBox {
         setSpacing(14);
         setPadding(new Insets(16));
         getStyleClass().add("canvas-pane");
-        setMinWidth(420);
-        setMaxWidth(780);
-        HBox.setHgrow(this, Priority.NEVER);
+        setMinWidth(0);
+        setMaxWidth(Double.MAX_VALUE);
+        setMaxHeight(USE_PREF_SIZE);
 
         getChildren().addAll(
             createHeader(),
@@ -51,18 +61,22 @@ public class CanvasPane extends VBox {
         VBox header = new VBox(8);
         header.getStyleClass().add("mode-header");
 
-        HBox titleRow = new HBox(16);
-        titleRow.setAlignment(Pos.CENTER_LEFT);
-
         Label keyboardMode = new Label("键盘模式");
         keyboardMode.getStyleClass().add("section-title");
 
-        HBox picker = new HBox(4);
+        FlowPane picker = new FlowPane(6, 6);
+        picker.setMinWidth(0);
         picker.getStyleClass().add("mode-picker");
         for (ModeSlot slot : ModeSlot.values()) {
             ToggleButton button = new ToggleButton(slot.getShortName());
             button.getStyleClass().add("mode-toggle");
             button.setUserData(slot);
+            button.setMinWidth(USE_PREF_SIZE);
+            button.prefWidthProperty().bind(Bindings.createDoubleBinding(() -> {
+                double available = picker.getWidth() - picker.getInsets().getLeft() - picker.getInsets().getRight();
+                int columns = available >= 660 ? 4 : 2;
+                return Math.max(152, (available - picker.getHgap() * (columns - 1)) / columns);
+            }, picker.widthProperty(), picker.insetsProperty()));
             button.setSelected(slot == studioState.getSelectedMode());
             button.setOnAction(event -> {
                 for (var node : picker.getChildren()) {
@@ -70,7 +84,7 @@ public class CanvasPane extends VBox {
                         tb.setSelected(s == slot);
                     }
                 }
-                controller.selectKeyboardMode(slot);
+                selectMode.accept(slot);
             });
             picker.getChildren().add(button);
         }
@@ -82,12 +96,10 @@ public class CanvasPane extends VBox {
             }
         });
 
-        HBox spacer = new HBox();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
-        titleRow.getChildren().addAll(keyboardMode, picker, spacer);
-
         modeGuidance.getStyleClass().add("hero-subtitle");
-        header.getChildren().addAll(titleRow, modeGuidance);
+        modeGuidance.setWrapText(true);
+        modeGuidance.setMinWidth(0);
+        header.getChildren().addAll(keyboardMode, picker, modeGuidance);
         return header;
     }
 
@@ -97,16 +109,49 @@ public class CanvasPane extends VBox {
 
         try {
             FXMLLoader loader = new FXMLLoader(getClass().getResource("/fxml/CanvasLayout.fxml"));
-            HBox layout = loader.load();
+            Region layout = loader.load();
             CanvasController controller = loader.getController();
             controller.setStudioState(studioState);
             controller.setDeviceStatus(deviceStatus);
             preview.getChildren().add(layout);
         } catch (IOException e) {
-            e.printStackTrace();
+            throw new UncheckedIOException("Cannot load keyboard preview", e);
         }
 
         return preview;
+    }
+
+    /** Uses logical pixels: JavaFX handles monitor scaling without scaling the controls twice. */
+    public static GridPane createWorkspace(Region canvas, Region inspector) {
+        GridPane workspace = new GridPane();
+        workspace.getStyleClass().add("workspace");
+        workspace.setMinWidth(0);
+        workspace.setHgap(16);
+        workspace.setVgap(16);
+        workspace.add(canvas, 0, 0);
+        workspace.add(inspector, 0, 1);
+        GridPane.setValignment(canvas, VPos.TOP);
+        GridPane.setValignment(inspector, VPos.TOP);
+        GridPane.setHgrow(canvas, Priority.ALWAYS);
+        GridPane.setHgrow(inspector, Priority.ALWAYS);
+        Runnable reflow = () -> {
+            boolean sideBySide = workspace.getWidth() >= 920;
+            int count = sideBySide ? 2 : 1;
+            if (workspace.getColumnConstraints().size() == count) return;
+            workspace.getColumnConstraints().clear();
+            for (int i = 0; i < count; i++) {
+                ColumnConstraints column = new ColumnConstraints();
+                column.setMinWidth(0);
+                column.setPercentWidth(100.0 / count);
+                column.setHgrow(Priority.ALWAYS);
+                workspace.getColumnConstraints().add(column);
+            }
+            GridPane.setColumnIndex(inspector, sideBySide ? 1 : 0);
+            GridPane.setRowIndex(inspector, sideBySide ? 0 : 1);
+        };
+        workspace.widthProperty().addListener((obs, before, after) -> reflow.run());
+        reflow.run();
+        return workspace;
     }
 
     private void refreshPreview() {

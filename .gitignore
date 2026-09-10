@@ -81,3 +81,10 @@ target/
 # Firmware object files
 *.o
 obj_final/
+
+# Local agent state and private maintainer overlay
+/.agents/
+/.agent-task.yaml
+/.agent-claim-lock/
+/.worktree/
+/.tests/cache/agent-knowledge/

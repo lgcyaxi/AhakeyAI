@@ -8,18 +8,24 @@ import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.InetSocketAddress;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Hook 分发服务器 — 监听固定 TCP 端口，接收来自 Codex/Claude/Cursor/Kimi hook 的事件名，
+ * Hook 分发服务器 — 监听一个可用的回环端口，接收来自 Codex/Claude/Cursor/Kimi hook 的事件名，
  * 映射到 BLE 状态码后通过 BleManager 发送到键盘。
  *
  * <p>架构角色：
  * <pre>
- *   Codex/Claude/Cursor/Kimi  →  PowerShell hook  →  TCP:8765  →  HookDispatchServer  →  BleManager  →  BLE-TCP bridge:9000  →  键盘
+ *   Codex/Claude/Cursor/Kimi → PowerShell hook → active-endpoint.json
+ *     → HookDispatchServer → BleManager → BLE-TCP bridge:9000 → 键盘
  * </pre>
  *
  * <p>支持两种输入格式：
@@ -30,14 +36,21 @@ import java.util.concurrent.Executors;
  */
 public class HookDispatchServer {
     private static final Logger logger = LoggerFactory.getLogger(HookDispatchServer.class);
+    private static final DateTimeFormatter OBSERVED_TIME =
+        DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
 
     public static final int DEFAULT_PORT = 8765;
 
     private final BleManager bleManager;
     private final int port;
+    private final Path endpointPath;
     private ServerSocket serverSocket;
     private ExecutorService executor;
     private volatile boolean running;
+    private volatile HookEndpoint.Descriptor endpointOwner;
+    private volatile String lastEventName;
+    private volatile Instant lastEventAt;
+    private final AtomicLong observedEventCount = new AtomicLong();
 
     /**
      * 所有平台 hook 事件名 → IDEState 映射。
@@ -84,12 +97,17 @@ public class HookDispatchServer {
     }
 
     public HookDispatchServer(BleManager bleManager) {
-        this(bleManager, DEFAULT_PORT);
+        this(bleManager, DEFAULT_PORT, HookEndpoint.endpointPath());
     }
 
     public HookDispatchServer(BleManager bleManager, int port) {
+        this(bleManager, port, HookEndpoint.endpointPath());
+    }
+
+    public HookDispatchServer(BleManager bleManager, int port, Path endpointPath) {
         this.bleManager = bleManager;
         this.port = port;
+        this.endpointPath = endpointPath;
     }
 
     /**
@@ -111,10 +129,18 @@ public class HookDispatchServer {
                 serverSocket.setReuseAddress(true);
                 serverSocket.bind(new InetSocketAddress("127.0.0.1", tryPort));
                 running = true;
-                logger.info("Hook 分发服务器已启动 - 127.0.0.1:{}", tryPort);
+                logger.info("Hook 分发服务器已启动 - 127.0.0.1:{}", serverSocket.getLocalPort());
                 break;
             } catch (IOException e) {
                 logger.warn("端口 {} 被占用，尝试下一个...", tryPort);
+                if (serverSocket != null) {
+                    try {
+                        serverSocket.close();
+                    } catch (IOException closeError) {
+                        logger.debug("关闭未绑定的 Hook socket 失败: {}", closeError.getMessage());
+                    }
+                    serverSocket = null;
+                }
                 tryPort++;
                 attempts++;
             }
@@ -122,7 +148,31 @@ public class HookDispatchServer {
 
         if (!running) {
             logger.error("Hook 分发服务器启动失败，已尝试端口 {}-{}", port, tryPort - 1);
+            executor.shutdownNow();
             return;
+        }
+
+        try {
+            endpointOwner = HookEndpoint.publish(endpointPath, getActualPort());
+            logger.info("Hook endpoint 已发布: {}", endpointPath);
+        } catch (IOException e) {
+            logger.error("Hook endpoint 发布失败，分发服务器将停止: {}", e.getMessage());
+            running = false;
+            try {
+                serverSocket.close();
+            } catch (IOException closeError) {
+                logger.debug("关闭未发布的 Hook 服务器失败: {}", closeError.getMessage());
+            }
+            executor.shutdownNow();
+            return;
+        }
+        try {
+            Path managedScript = endpointPath.resolveSibling(HookEndpoint.SCRIPT_FILE_NAME);
+            if (HookEndpoint.refreshPowerShellScriptIfPresent(managedScript)) {
+                logger.info("已刷新现有 AhaKey Hook 分发脚本");
+            }
+        } catch (IOException e) {
+            logger.warn("刷新 AhaKey Hook 分发脚本失败: {}", e.getMessage());
         }
 
         executor.submit(this::acceptLoop);
@@ -134,6 +184,16 @@ public class HookDispatchServer {
 
     public boolean isRunning() {
         return running;
+    }
+
+    public String getObservationSummary() {
+        Instant observedAt = lastEventAt;
+        String eventName = lastEventName;
+        if (eventName == null || observedAt == null) {
+            return "本次 Studio 运行尚未收到 Hook 事件";
+        }
+        return "最近事件 " + eventName + " · " + OBSERVED_TIME.format(observedAt)
+            + " · 共 " + observedEventCount.get() + " 次";
     }
 
     private void acceptLoop() {
@@ -170,6 +230,7 @@ public class HookDispatchServer {
                 writer.println("{\"ok\":false,\"error\":\"unknown event: " + eventName + "\"}");
                 return;
             }
+            recordObservedEvent(eventName);
 
             // 检查 PermissionRequest 事件是否需要自动批准
             if (state == IDEState.PERMISSION_REQUEST) {
@@ -242,6 +303,12 @@ public class HookDispatchServer {
         return line;
     }
 
+    private void recordObservedEvent(String eventName) {
+        lastEventName = eventName;
+        lastEventAt = Instant.now();
+        observedEventCount.incrementAndGet();
+    }
+
     public void stop() {
         running = false;
         try {
@@ -254,6 +321,12 @@ public class HookDispatchServer {
         if (executor != null) {
             executor.shutdownNow();
         }
+        try {
+            HookEndpoint.clearIfOwned(endpointPath, endpointOwner);
+        } catch (IOException e) {
+            logger.warn("清理 Hook endpoint 异常: {}", e.getMessage());
+        }
+        endpointOwner = null;
         logger.info("Hook 分发服务器已停止");
     }
 }

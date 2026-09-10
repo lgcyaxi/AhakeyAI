@@ -20,6 +20,7 @@ namespace BLE_tcp_driver
         private volatile bool _running;
 
         private DeviceStatusInfo _deviceStatus;
+        private bool _hasDeviceStatus;
         private readonly object _statusLock = new object();
 
         /// <summary>
@@ -31,6 +32,7 @@ namespace BLE_tcp_driver
         /// TCP客户端数量变化事件
         /// </summary>
         public event Action<int> OnClientCountChanged;
+        public Func<PacketType, byte[], byte[]> HandleDeviceControl { get; set; }
 
         public int Port => _port;
         public int ClientCount { get { lock (_clientLock) return _clients.Count; } }
@@ -44,14 +46,14 @@ namespace BLE_tcp_driver
         public void Start()
         {
             if (_running) return;
-            _listener = new TcpListener(IPAddress.Any, _port);
+            _listener = new TcpListener(IPAddress.Loopback, _port);
             _listener.Start();
             _running = true;
 
             // 订阅BLE通知, 转发给所有TCP客户端
             _bleCore.ReceiveNotifyData += OnBleNotify;
 
-            Log($"TCP服务器已启动, 监听端口: {_port}");
+            Log($"TCP服务器已启动, 仅监听 127.0.0.1:{_port}");
             Task.Run(() => AcceptLoop());
         }
 
@@ -83,6 +85,7 @@ namespace BLE_tcp_driver
                 try
                 {
                     var client = await _listener.AcceptTcpClientAsync();
+                    client.SendTimeout = 3000;
                     lock (_clientLock) _clients.Add(client);
 
                     string ep = GetEndpointString(client);
@@ -129,7 +132,7 @@ namespace BLE_tcp_driver
                         if (n < dataLen) break;
                     }
 
-                    HandlePacket(client, type, data);
+                    await _bleCore.DispatchAsync(() => HandlePacket(client, type, data));
                 }
             }
             catch (IOException) { }
@@ -147,8 +150,17 @@ namespace BLE_tcp_driver
         /// </summary>
         private void HandlePacket(TcpClient client, PacketType type, byte[] data)
         {
+            data = data ?? new byte[0];
             switch (type)
             {
+                case PacketType.ListDevices:
+                case PacketType.SelectDevice:
+                case PacketType.ScanDevices:
+                case PacketType.DisconnectDevice:
+                case PacketType.QueryBridgeInfo:
+                case PacketType.ShutdownBridge:
+                    if (HandleDeviceControl != null) SendToClient(client, HandleDeviceControl(type, data));
+                    break;
                 case PacketType.WriteData:
                     if (_bleCore.CurrentDataCharacteristic != null)
                     {
@@ -190,8 +202,19 @@ namespace BLE_tcp_driver
 
                 case PacketType.QueryDeviceInfo:
                     DeviceStatusInfo info;
-                    lock (_statusLock) info = _deviceStatus;
-                    SendToClient(client, ProtocolHelper.BuildDeviceInfoPacket(info));
+                    bool hasDeviceStatus;
+                    lock (_statusLock)
+                    {
+                        info = _deviceStatus;
+                        hasDeviceStatus = _hasDeviceStatus;
+                    }
+                    var bleStatus = BuildBleStatus();
+                    SendToClient(
+                        client,
+                        hasDeviceStatus && bleStatus.Connected && bleStatus.IsTargetDevice
+                            ? ProtocolHelper.BuildDeviceInfoPacket(info)
+                            : ProtocolHelper.BuildPacket(PacketType.DeviceInfoResp)
+                    );
                     Log("响应设备信息查询");
                     break;
 
@@ -220,9 +243,7 @@ namespace BLE_tcp_driver
                 mac = BitConverter.ToString(macBytes, 2, 6).Replace('-', ':');
             }
 
-            bool isTarget = _bleCore.CurrentDataCharacteristic != null
-                         && _bleCore.CurrentWriteCharacteristic != null
-                         && _bleCore.CurrentNotifyCharacteristic != null;
+            bool isTarget = _bleCore.IsReady;
 
             return new BleStatusInfo
             {
@@ -242,7 +263,11 @@ namespace BLE_tcp_driver
             if (ProtocolHelper.IsDeviceStatusNotification(data))
             {
                 var newStatus = ProtocolHelper.ParseDeviceStatusFromNotification(data);
-                lock (_statusLock) _deviceStatus = newStatus;
+                lock (_statusLock)
+                {
+                    _deviceStatus = newStatus;
+                    _hasDeviceStatus = true;
+                }
                 Log($"设备状态更新: 电量={newStatus.BatteryLevel} 信号={newStatus.SignalStrength} " +
                     $"固件={newStatus.FirmwareVersionMain}.{newStatus.FirmwareVersionSub} " +
                     $"工作模式={newStatus.WorkMode} 灯光={newStatus.LightMode} 开关={newStatus.SwitchState}");
@@ -251,6 +276,15 @@ namespace BLE_tcp_driver
 
             byte[] packet = ProtocolHelper.BuildPacket(PacketType.BleNotify, data);
             BroadcastToAll(packet);
+        }
+
+        public void ResetDeviceStatus()
+        {
+            lock (_statusLock)
+            {
+                _deviceStatus = new DeviceStatusInfo();
+                _hasDeviceStatus = false;
+            }
         }
 
         /// <summary>
@@ -270,8 +304,11 @@ namespace BLE_tcp_driver
             {
                 if (client.Connected)
                 {
-                    var stream = client.GetStream();
-                    stream.Write(packet, 0, packet.Length);
+                    lock (client)
+                    {
+                        var stream = client.GetStream();
+                        stream.Write(packet, 0, packet.Length);
+                    }
                 }
             }
             catch { RemoveClient(client); }
@@ -314,17 +351,11 @@ namespace BLE_tcp_driver
         private void Log(string msg) => OnLog?.Invoke(msg);
 
         /// <summary>
-        /// 获取本机局域网IP地址
+        /// 获取 TCP 服务监听地址。控制协议只允许本机客户端访问。
         /// </summary>
         public static string GetLocalIPAddress()
         {
-            try
-            {
-                var host = Dns.GetHostEntry(Dns.GetHostName());
-                var ip = host.AddressList.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
-                return ip?.ToString() ?? "127.0.0.1";
-            }
-            catch { return "127.0.0.1"; }
+            return IPAddress.Loopback.ToString();
         }
     }
 }

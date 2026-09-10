@@ -3,9 +3,11 @@
 本文档用于后续 AI 或工程人员在当前工作区内重复构建 `VibecodingKeyboard_Setup.exe`。  
 目标不是解释项目背景，而是给出一份可直接执行、尽量少踩坑的操作说明。
 
+文中的 `C:\AhaKeyBuild` 是不包含个人用户名的示例构建根目录；使用其他可写目录时，应整体替换该前缀。
+
 最后一次按本文档验证成功的日期：`2026-04-10`  
 最后一次成功产物：
-- 安装包：`C:\Users\20825\Desktop\windows软件打包\VibecodingKeyboard_Setup.exe`
+- 安装包：`C:\AhaKeyBuild\VibecodingKeyboard_Setup.exe`
 - SHA-256：`A7F9F9D152E03113CB2F1FA2451523062CAEBF33259BB5A156A0B53D0F0EF423`
 
 ---
@@ -24,15 +26,15 @@
 
 最终这些文件先汇总到：
 
-- `C:\Users\20825\Desktop\windows软件打包\all_in_one`
+- `C:\AhaKeyBuild\all_in_one`
 
 然后由 Inno Setup 脚本：
 
-- `C:\Users\20825\Desktop\windows软件打包\VibecodingKeyboard_Setup.iss`
+- `C:\AhaKeyBuild\VibecodingKeyboard_Setup.iss`
 
 打成最终安装包：
 
-- `C:\Users\20825\Desktop\windows软件打包\VibecodingKeyboard_Setup.exe`
+- `C:\AhaKeyBuild\VibecodingKeyboard_Setup.exe`
 
 ---
 
@@ -44,7 +46,7 @@
 
 可用目录：
 
-- `C:\Users\20825\Desktop\windows软件打包\vibe_code_config_tool-master\vibe_code_config_tool-master`
+- `C:\AhaKeyBuild\vibe_code_config_tool-master\vibe_code_config_tool-master`
 
 说明：
 
@@ -59,7 +61,7 @@
 
 可用目录：
 
-- `C:\Users\20825\Desktop\windows软件打包\vibe_code_config_tool-master\vibe_code_config_tool-master\hook`
+- `C:\AhaKeyBuild\vibe_code_config_tool-master\vibe_code_config_tool-master\hook`
 
 说明：
 
@@ -72,7 +74,7 @@
 
 可用目录：
 
-- `C:\Users\20825\Desktop\windows软件打包\Capswriter-master\Capswriter-master`
+- `C:\AhaKeyBuild\Capswriter-master\Capswriter-master`
 
 说明：
 
@@ -85,7 +87,7 @@
 
 源码目录：
 
-- `C:\Users\20825\Desktop\windows软件打包\BLE_tcp_bridge_for_vibe_code-master (1)\BLE_tcp_bridge_for_vibe_code-master`
+- `C:\AhaKeyBuild\BLE_tcp_bridge_for_vibe_code-master (1)\BLE_tcp_bridge_for_vibe_code-master`
 
 说明：
 
@@ -98,7 +100,7 @@
 
 可用目录：
 
-- `C:\Users\20825\Desktop\windows软件打包\wxcloudrun-flask-main\wxcloudrun-flask-main`
+- `C:\AhaKeyBuild\wxcloudrun-flask-main\wxcloudrun-flask-main`
 
 说明：
 
@@ -110,7 +112,7 @@
 
 可用目录：
 
-- `C:\Users\20825\Desktop\windows软件打包\all_in_one`
+- `C:\AhaKeyBuild\all_in_one`
 
 说明：
 
@@ -126,7 +128,7 @@
 
 可用环境：
 
-- `C:\Users\20825\Desktop\windows软件打包\.venv_qt68`
+- `C:\AhaKeyBuild\.venv_qt68`
 
 已验证版本：
 
@@ -143,7 +145,7 @@
 
 可用环境：
 
-- `C:\Users\20825\Desktop\windows软件打包\.venv_clean311`
+- `C:\AhaKeyBuild\.venv_clean311`
 
 已验证版本：
 
@@ -164,7 +166,7 @@
 
 目录：
 
-- `C:\Users\20825\Desktop\windows软件打包\.venv_build`
+- `C:\AhaKeyBuild\.venv_build`
 
 不建议作为完整打包环境的原因：
 
@@ -184,7 +186,7 @@
 
 目录：
 
-- `C:\Users\20825\Desktop\windows软件打包\Vibe_admin-main`
+- `C:\AhaKeyBuild\Vibe_admin-main`
 
 说明：
 
@@ -195,7 +197,7 @@
 
 目录：
 
-- `C:\Users\20825\Desktop\windows软件打包\typeless_upload`
+- `C:\AhaKeyBuild\typeless_upload`
 
 说明：
 
@@ -234,7 +236,7 @@
 
 文件：
 
-- `C:\Users\20825\Desktop\windows软件打包\vibe_code_config_tool-master\vibe_code_config_tool-master\src\core\app_version.py`
+- `C:\AhaKeyBuild\vibe_code_config_tool-master\vibe_code_config_tool-master\src\core\app_version.py`
 
 当前值：
 
@@ -248,7 +250,7 @@
 
 文件：
 
-- `C:\Users\20825\Desktop\windows软件打包\VibecodingKeyboard_Setup.iss`
+- `C:\AhaKeyBuild\VibecodingKeyboard_Setup.iss`
 
 当前值：
 
@@ -262,7 +264,7 @@
 
 文件：
 
-- `C:\Users\20825\Desktop\windows软件打包\vibe_code_config_tool-master\vibe_code_config_tool-master\src\core\cloud_settings.py`
+- `C:\AhaKeyBuild\vibe_code_config_tool-master\vibe_code_config_tool-master\src\core\cloud_settings.py`
 
 当前默认值：
 
@@ -278,7 +280,7 @@
 
 文件：
 
-- `C:\Users\20825\Desktop\windows软件打包\Capswriter-master\Capswriter-master\text_optimizer.py`
+- `C:\AhaKeyBuild\Capswriter-master\Capswriter-master\text_optimizer.py`
 
 当前内置默认值：
 
@@ -293,15 +295,15 @@
 
 接口实现文件：
 
-- `C:\Users\20825\Desktop\windows软件打包\wxcloudrun-flask-main\wxcloudrun-flask-main\wxcloudrun\api\v1\client_routes.py`
+- `C:\AhaKeyBuild\wxcloudrun-flask-main\wxcloudrun-flask-main\wxcloudrun\api\v1\client_routes.py`
 
 路由聚合文件：
 
-- `C:\Users\20825\Desktop\windows软件打包\wxcloudrun-flask-main\wxcloudrun-flask-main\wxcloudrun\api\v1\routes.py`
+- `C:\AhaKeyBuild\wxcloudrun-flask-main\wxcloudrun-flask-main\wxcloudrun\api\v1\routes.py`
 
 环境变量读取文件：
 
-- `C:\Users\20825\Desktop\windows软件打包\wxcloudrun-flask-main\wxcloudrun-flask-main\config.py`
+- `C:\AhaKeyBuild\wxcloudrun-flask-main\wxcloudrun-flask-main\config.py`
 
 当前接口：
 
@@ -341,7 +343,7 @@
 
 文件：
 
-- `C:\Users\20825\Desktop\windows软件打包\all_in_one\install_hook.py`
+- `C:\AhaKeyBuild\all_in_one\install_hook.py`
 
 说明：
 
@@ -375,7 +377,7 @@
 进入源码目录：
 
 ```powershell
-Set-Location 'C:\Users\20825\Desktop\windows软件打包\vibe_code_config_tool-master\vibe_code_config_tool-master'
+Set-Location 'C:\AhaKeyBuild\vibe_code_config_tool-master\vibe_code_config_tool-master'
 ```
 
 建议先清理旧产物：
@@ -393,7 +395,7 @@ Remove-Item -Recurse -Force .\dist\KeyboardConfig -ErrorAction SilentlyContinue
 执行构建：
 
 ```powershell
-& 'C:\Users\20825\Desktop\windows软件打包\.venv_qt68\Scripts\python.exe' -m PyInstaller --noconfirm .\KeyboardConfig_onedir.spec
+& 'C:\AhaKeyBuild\.venv_qt68\Scripts\python.exe' -m PyInstaller --noconfirm .\KeyboardConfig_onedir.spec
 ```
 
 成功后可用产物是：
@@ -415,7 +417,7 @@ Remove-Item -Recurse -Force .\dist\KeyboardConfig -ErrorAction SilentlyContinue
 进入 Hook 目录：
 
 ```powershell
-Set-Location 'C:\Users\20825\Desktop\windows软件打包\vibe_code_config_tool-master\vibe_code_config_tool-master\hook'
+Set-Location 'C:\AhaKeyBuild\vibe_code_config_tool-master\vibe_code_config_tool-master\hook'
 ```
 
 建议先清理旧产物：
@@ -428,7 +430,7 @@ Remove-Item -Force .\dist\hook_install.exe -ErrorAction SilentlyContinue
 执行构建：
 
 ```powershell
-& 'C:\Users\20825\Desktop\windows软件打包\.venv_qt68\Scripts\python.exe' -m PyInstaller --noconfirm .\hook_install.spec
+& 'C:\AhaKeyBuild\.venv_qt68\Scripts\python.exe' -m PyInstaller --noconfirm .\hook_install.spec
 ```
 
 成功后产物：
@@ -445,7 +447,7 @@ Remove-Item -Force .\dist\hook_install.exe -ErrorAction SilentlyContinue
 进入目录：
 
 ```powershell
-Set-Location 'C:\Users\20825\Desktop\windows软件打包\Capswriter-master\Capswriter-master'
+Set-Location 'C:\AhaKeyBuild\Capswriter-master\Capswriter-master'
 ```
 
 建议先清理旧产物：
@@ -458,7 +460,7 @@ Remove-Item -Recurse -Force .\dist\CapsWriter-Offline -ErrorAction SilentlyConti
 执行构建：
 
 ```powershell
-& 'C:\Users\20825\Desktop\windows软件打包\.venv_clean311\Scripts\python.exe' -m PyInstaller --noconfirm .\build.spec
+& 'C:\AhaKeyBuild\.venv_clean311\Scripts\python.exe' -m PyInstaller --noconfirm .\build.spec
 ```
 
 成功后产物目录：
@@ -483,7 +485,7 @@ Remove-Item -Recurse -Force .\dist\CapsWriter-Offline -ErrorAction SilentlyConti
 回到工作区根目录：
 
 ```powershell
-Set-Location 'C:\Users\20825\Desktop\windows软件打包'
+Set-Location 'C:\AhaKeyBuild'
 ```
 
 先确认 `all_in_one` 中已有以下外部文件：
@@ -526,13 +528,13 @@ Copy-Item '.\Capswriter-master\Capswriter-master\dist\CapsWriter-Offline' '.\all
 在根目录执行：
 
 ```powershell
-Set-Location 'C:\Users\20825\Desktop\windows软件打包'
-& 'C:\Users\20825\AppData\Local\Programs\Inno Setup 6\ISCC.exe' '.\VibecodingKeyboard_Setup.iss'
+Set-Location 'C:\AhaKeyBuild'
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" '.\VibecodingKeyboard_Setup.iss'
 ```
 
 成功后产物：
 
-- `C:\Users\20825\Desktop\windows软件打包\VibecodingKeyboard_Setup.exe`
+- `C:\AhaKeyBuild\VibecodingKeyboard_Setup.exe`
 
 ### 6.6 安装器语言文件说明
 
@@ -550,7 +552,7 @@ Set-Location 'C:\Users\20825\Desktop\windows软件打包'
 
 - 这台机器安装的 Inno Setup 缺简体中文语言包。
 - 所以必须保留这个文件在安装脚本旁边：
-  - `C:\Users\20825\Desktop\windows软件打包\ChineseSimplified.isl`
+  - `C:\AhaKeyBuild\ChineseSimplified.isl`
 - 如果删掉它，安装器会重新编译失败。
 
 ---
@@ -559,7 +561,7 @@ Set-Location 'C:\Users\20825\Desktop\windows软件打包'
 
 文件：
 
-- `C:\Users\20825\Desktop\windows软件打包\VibecodingKeyboard_Setup.iss`
+- `C:\AhaKeyBuild\VibecodingKeyboard_Setup.iss`
 
 当前行为如下：
 
@@ -767,7 +769,7 @@ Set-Location 'C:\Users\20825\Desktop\windows软件打包'
 
 文件：
 
-- `C:\Users\20825\Desktop\windows软件打包\vibe_code_config_tool-master\vibe_code_config_tool-master\src\ui\main_window.py`
+- `C:\AhaKeyBuild\vibe_code_config_tool-master\vibe_code_config_tool-master\src\ui\main_window.py`
 
 说明：
 
@@ -778,7 +780,7 @@ Set-Location 'C:\Users\20825\Desktop\windows软件打包'
 
 文件：
 
-- `C:\Users\20825\Desktop\windows软件打包\vibe_code_config_tool-master\vibe_code_config_tool-master\src\ui\main_window.py`
+- `C:\AhaKeyBuild\vibe_code_config_tool-master\vibe_code_config_tool-master\src\ui\main_window.py`
 
 说明：
 
@@ -790,8 +792,8 @@ Set-Location 'C:\Users\20825\Desktop\windows软件打包'
 
 文件：
 
-- `C:\Users\20825\Desktop\windows软件打包\Capswriter-master\Capswriter-master\config_server.py`
-- `C:\Users\20825\Desktop\windows软件打包\Capswriter-master\Capswriter-master\util\server\server_check_model.py`
+- `C:\AhaKeyBuild\Capswriter-master\Capswriter-master\config_server.py`
+- `C:\AhaKeyBuild\Capswriter-master\Capswriter-master\util\server\server_check_model.py`
 
 说明：
 
@@ -802,8 +804,8 @@ Set-Location 'C:\Users\20825\Desktop\windows软件打包'
 
 文件：
 
-- `C:\Users\20825\Desktop\windows软件打包\vibe_code_config_tool-master\vibe_code_config_tool-master\hook\launcher.py`
-- `C:\Users\20825\Desktop\windows软件打包\vibe_code_config_tool-master\vibe_code_config_tool-master\hook\hook_install.spec`
+- `C:\AhaKeyBuild\vibe_code_config_tool-master\vibe_code_config_tool-master\hook\launcher.py`
+- `C:\AhaKeyBuild\vibe_code_config_tool-master\vibe_code_config_tool-master\hook\hook_install.spec`
 
 说明：
 

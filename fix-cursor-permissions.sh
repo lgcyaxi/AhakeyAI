@@ -9,5 +9,5 @@ cat ~/.cursor/cli-config.json | grep -A 5 "permissions"
 # 测试 cursor-agent 是否会自动批准 python3 命令
 echo "\n测试 python3 自动批准："
 cursor-agent --force --print << 'EOF'
-请执行 python3 /Users/cjn/Desktop/keyboard1/ahakeyconfig/helloworld.py
+请执行 python3 --version
 EOF
