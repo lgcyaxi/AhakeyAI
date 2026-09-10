@@ -50,11 +50,26 @@ public class StudioController {
 
         bleManager = BleManager.fromEnvironment(new BleManager.BleCallback() {
             @Override
+            public void onTransportReady() {
+                Platform.runLater(() -> {
+                    clearDeviceConnectionState();
+                    studioState.syncStatusProperty().set(
+                        "设备后台已启动，正在连接键盘。语音输入可以独立使用。"
+                    );
+                });
+                startStatusPolling();
+            }
+
+            @Override
             public void onConnected() {
                 logger.info("收到设备连接通知");
                 Platform.runLater(() -> {
                     DeviceStatus status = bleManager.getCachedStatus();
                     applyBleStatus(status);
+                    String message = studioState.syncStatusProperty().get();
+                    if (message.startsWith("设备后台") || message.startsWith("BLE 配置驱动")) {
+                        studioState.syncStatusProperty().set("设备已连接。配置修改先保存在本机，保存配置后写入键盘。");
+                    }
                 });
                 // 有线（USB HID）连接时启动 Kimi AhaKey 桥接（无线模式下 9000 端口已由 BLE-TCP bridge 占用）
                 if (bleManager.isUsbConnected()) {
@@ -66,7 +81,7 @@ public class StudioController {
 
             @Override
             public void onDisconnected() {
-                Platform.runLater(() -> deviceStatus.setConnected(false));
+                Platform.runLater(StudioController.this::clearDeviceConnectionState);
                 // 停止定时轮询
                 stopStatusPolling();
             }
@@ -81,7 +96,13 @@ public class StudioController {
 
             @Override
             public void onError(String message) {
-                Platform.runLater(() -> studioState.syncStatusProperty().set(message));
+                Platform.runLater(() -> {
+                    clearDeviceConnectionState();
+                    studioState.syncStatusProperty().set(message);
+                });
+                if (!bleManager.isTransportConnected()) {
+                    stopStatusPolling();
+                }
             }
         });
 
@@ -110,6 +131,18 @@ public class StudioController {
 
     public VoiceRelayPlatform getVoiceRelay() {
         return voiceRelay;
+    }
+
+    public boolean isHookDispatchRunning() {
+        return hookDispatchServer.isRunning();
+    }
+
+    public int getHookDispatchPort() {
+        return hookDispatchServer.getActualPort();
+    }
+
+    public String getHookObservationSummary() {
+        return hookDispatchServer.getObservationSummary();
     }
 
     public DeviceStatus getDeviceStatus() {
@@ -153,12 +186,13 @@ public class StudioController {
         int pollPeriod = ModelConfig.getInstance().getStatusPollPeriodSeconds();
         logger.info("设备状态轮询周期: {}秒", pollPeriod);
         pollFuture = statusPoller.scheduleAtFixedRate(() -> {
-            if (!simulateBle && deviceStatus.isConnected()) {
+            if (!simulateBle && bleManager.isTransportConnected()) {
                 try {
                     bleManager.queryStatus();
                     // 检查心跳超时：超过15秒没有收到状态更新，认为设备已断开
                     long lastUpdate = bleManager.getLastStatusUpdateTime();
-                    if (lastUpdate > 0 && System.currentTimeMillis() - lastUpdate > 15000) {
+                    if (deviceStatus.isConnected() && lastUpdate > 0
+                        && System.currentTimeMillis() - lastUpdate > 15000) {
                         logger.warn("设备心跳超时，断开连接");
                         bleManager.disconnect();
                     }
@@ -196,6 +230,7 @@ public class StudioController {
     }
 
     public void userDisconnect() {
+        clearDeviceConnectionState();
         bleManager.disconnect();
     }
 
@@ -600,17 +635,25 @@ public class StudioController {
     }
     public void applyVoicePreset(VoicePreset preset) {
         var key = studioState.getKeyConfig(StudioPart.KEY1);
+        VoicePreset previousPreset = key.getVoicePreset();
+        VoiceTriggerMode previousDefault = VoiceTriggerMode.defaultFor(previousPreset);
         key.setVoicePreset(preset);
-        if (preset.locksShortcut()) {
-            if (preset == VoicePreset.MACOS_NATIVE) {
-                // macOS 原生语音始终使用 F18
-                key.setHidCode(com.example.ahakey.model.HIDUsage.F18);
-            } else if (studioState.getSelectedMode() == ModeSlot.MODE1) {
-                key.setHidCode(com.example.ahakey.model.HIDUsage.F17);
-            } else {
-                key.setHidCode(com.example.ahakey.model.HIDUsage.F18);
-            }
+        if (key.getVoiceTriggerMode() == previousDefault) {
+            key.setVoiceTriggerMode(VoiceTriggerMode.defaultFor(preset));
         }
+        if (preset.locksShortcut()) {
+            key.setHidCode(preset.windowsHidCode(
+                studioState.getSelectedMode(),
+                key.getHidCode()
+            ));
+        }
+        studioState.markDirty(StudioPart.KEY1);
+        refreshVoiceRoutes();
+    }
+
+    public void applyVoiceTriggerMode(VoiceTriggerMode triggerMode) {
+        var key = studioState.getKeyConfig(StudioPart.KEY1);
+        key.setVoiceTriggerMode(triggerMode);
         studioState.markDirty(StudioPart.KEY1);
         refreshVoiceRoutes();
     }
@@ -637,6 +680,17 @@ public class StudioController {
         voiceRelay.updateRoutes(studioState);
     }
 
+    private void clearDeviceConnectionState() {
+        deviceStatus.setConnected(false);
+        deviceStatus.setScanning(false);
+        deviceStatus.setBatteryLevel(-1);
+        deviceStatus.setSignal(-1);
+        deviceStatus.setFirmwareMain(-1);
+        deviceStatus.setFirmwareSub(-1);
+        deviceStatus.setSwitchState(-1);
+        deviceStatus.setDeviceName("等待设备");
+    }
+
     private void applyBleStatus(DeviceStatus status) {
         logger.info("应用BLE状态 - 电量: {}, 工作模式: {}, 拨杆状态: {}", 
             status.getBatteryLevel(), 
@@ -658,4 +712,3 @@ public class StudioController {
         StudioStore.save(studioState.toPersisted());
     }
 }
-

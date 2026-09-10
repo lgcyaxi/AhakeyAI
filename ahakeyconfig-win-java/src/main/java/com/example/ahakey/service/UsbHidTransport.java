@@ -17,7 +17,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 public class UsbHidTransport implements Closeable {
     private static final Logger logger = LoggerFactory.getLogger(UsbHidTransport.class);
@@ -30,29 +34,39 @@ public class UsbHidTransport implements Closeable {
     private static final int FILE_SHARE_READ = 0x00000001;
     private static final int FILE_SHARE_WRITE = 0x00000002;
     private static final int OPEN_EXISTING = 3;
-    private static final int REPORT_SIZE = 64;
+    private static final int LEGACY_REPORT_LENGTH = 65;
     private static final byte USB_COMMAND_PACKET = (byte) 0xA1;
     private static final byte USB_DATA_PACKET = (byte) 0xA2;
 
     private Pointer readHandle;
     private Pointer writeHandle;
     private String devicePath;
+    private DeviceProfile deviceProfile;
     private Thread readerThread;
     private volatile boolean running;
-    private Consumer<byte[]> frameConsumer;
+    private volatile Consumer<byte[]> frameConsumer;
+
+    static record DeviceProfile(
+        String path,
+        byte reportId,
+        int reportLength,
+        boolean allowLegacyNoReportIdFallback
+    ) {
+    }
 
     public static boolean isPresent() {
-        return findDevicePath() != null;
+        return findDeviceProfile() != null;
     }
 
     public synchronized void open(Consumer<byte[]> onFrame) throws IOException {
         if (isOpen()) {
             return;
         }
-        String path = findDevicePath();
-        if (path == null) {
+        DeviceProfile profile = findDeviceProfile();
+        if (profile == null) {
             throw new IOException("USB HID device not found");
         }
+        String path = profile.path();
         Pointer r = Kernel32.INSTANCE.CreateFile(
             new WString(path),
             GENERIC_READ,
@@ -82,10 +96,62 @@ public class UsbHidTransport implements Closeable {
         readHandle = r;
         writeHandle = w;
         devicePath = path;
+        deviceProfile = profile;
         frameConsumer = onFrame;
         running = true;
         startReader();
         logger.info("USB HID connected: {}", path);
+    }
+
+    /**
+     * Opens the selected HID interface and proves that it is an AhaKey
+     * configuration channel before returning it to the caller.
+     */
+    public byte[] openValidated(
+        byte[] statusQuery,
+        Predicate<byte[]> statusValidator,
+        Consumer<byte[]> onFrame,
+        long timeoutMs
+    ) throws IOException {
+        if (statusQuery == null || statusValidator == null || timeoutMs <= 0) {
+            throw new IllegalArgumentException("USB validation requires a query, validator, and positive timeout");
+        }
+        synchronized (this) {
+            if (isOpen()) {
+                throw new IOException("USB HID is already open");
+            }
+        }
+
+        CountDownLatch statusReceived = new CountDownLatch(1);
+        AtomicReference<byte[]> validatedFrame = new AtomicReference<>();
+        open(frame -> {
+            try {
+                if (statusValidator.test(frame) && validatedFrame.compareAndSet(null, frame)) {
+                    statusReceived.countDown();
+                }
+            } catch (RuntimeException e) {
+                logger.debug("USB HID validation rejected a frame: {}", e.getMessage());
+            }
+        });
+
+        try {
+            sendCommand(statusQuery);
+            if (!statusReceived.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+                throw new IOException("USB HID did not return a valid AhaKey status frame within " + timeoutMs + " ms");
+            }
+            byte[] frame = validatedFrame.get();
+            if (frame == null) {
+                throw new IOException("USB HID validation completed without a status frame");
+            }
+            frameConsumer = onFrame;
+            return frame;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("USB HID validation was interrupted", e);
+        } catch (IOException | RuntimeException e) {
+            close();
+            throw e;
+        }
     }
 
     public synchronized boolean isOpen() {
@@ -96,26 +162,17 @@ public class UsbHidTransport implements Closeable {
 
     public synchronized void sendCommand(byte[] frame) throws IOException {
         ensureOpen();
-        if (frame.length > REPORT_SIZE - 2) {
-            throw new IOException("USB command frame too large: " + frame.length);
-        }
-        byte[] payload = new byte[REPORT_SIZE];
-        payload[0] = USB_COMMAND_PACKET;
-        payload[1] = (byte) frame.length;
-        System.arraycopy(frame, 0, payload, 2, frame.length);
-        writeReport(payload);
+        writeReport(buildOutputReport(deviceProfile, USB_COMMAND_PACKET, frame));
     }
 
     public synchronized void sendData(byte[] data) throws IOException {
         ensureOpen();
+        int chunkCapacity = deviceProfile.reportLength() - 3;
         int offset = 0;
         while (offset < data.length) {
-            int len = Math.min(REPORT_SIZE - 2, data.length - offset);
-            byte[] payload = new byte[REPORT_SIZE];
-            payload[0] = USB_DATA_PACKET;
-            payload[1] = (byte) len;
-            System.arraycopy(data, offset, payload, 2, len);
-            writeReport(payload);
+            int len = Math.min(chunkCapacity, data.length - offset);
+            byte[] chunk = Arrays.copyOfRange(data, offset, offset + len);
+            writeReport(buildOutputReport(deviceProfile, USB_DATA_PACKET, chunk));
             offset += len;
             sleepQuietly(2);
         }
@@ -129,20 +186,39 @@ public class UsbHidTransport implements Closeable {
         }
     }
 
-    private void writeReport(byte[] payload64) throws IOException {
-        byte[] reportWithId = new byte[REPORT_SIZE + 1];
-        reportWithId[0] = 0;
-        System.arraycopy(payload64, 0, reportWithId, 1, payload64.length);
+    static byte[] buildCommandReport(DeviceProfile profile, byte[] frame) throws IOException {
+        return buildOutputReport(profile, USB_COMMAND_PACKET, frame);
+    }
 
+    private static byte[] buildOutputReport(DeviceProfile profile, byte packetType, byte[] data) throws IOException {
+        if (profile == null) {
+            throw new IOException("USB HID profile is unavailable");
+        }
+        int capacity = profile.reportLength() - 3;
+        if (data.length > capacity) {
+            throw new IOException("USB HID frame too large: " + data.length + " > " + capacity);
+        }
+        byte[] report = new byte[profile.reportLength()];
+        report[0] = profile.reportId();
+        report[1] = packetType;
+        report[2] = (byte) data.length;
+        System.arraycopy(data, 0, report, 3, data.length);
+        return report;
+    }
+
+    private void writeReport(byte[] report) throws IOException {
         IntByReference written = new IntByReference();
         Pointer h = writeHandle;
         if (h == null || isInvalidHandle(h)) {
             throw new IOException("USB HID write handle not connected");
         }
-        boolean ok = Kernel32.INSTANCE.WriteFile(h, reportWithId, reportWithId.length, written, Pointer.NULL);
-        if (!ok) {
+        boolean ok = Kernel32.INSTANCE.WriteFile(h, report, report.length, written, Pointer.NULL)
+            && written.getValue() == report.length;
+        if (!ok && deviceProfile.allowLegacyNoReportIdFallback() && report.length > 1) {
+            byte[] withoutReportId = Arrays.copyOfRange(report, 1, report.length);
             written.setValue(0);
-            ok = Kernel32.INSTANCE.WriteFile(h, payload64, payload64.length, written, Pointer.NULL);
+            ok = Kernel32.INSTANCE.WriteFile(h, withoutReportId, withoutReportId.length, written, Pointer.NULL)
+                && written.getValue() == withoutReportId.length;
         }
         if (!ok) {
             throw new IOException("USB HID write failed: " + Native.getLastError());
@@ -150,8 +226,9 @@ public class UsbHidTransport implements Closeable {
     }
 
     private void startReader() {
+        DeviceProfile activeProfile = deviceProfile;
         readerThread = new Thread(() -> {
-            byte[] report = new byte[REPORT_SIZE + 1];
+            byte[] report = new byte[activeProfile.reportLength()];
             while (running) {
                 Pointer h = readHandle;
                 if (h == null || isInvalidHandle(h)) {
@@ -202,6 +279,8 @@ public class UsbHidTransport implements Closeable {
                     writeHandle = null;
                 }
                 devicePath = null;
+                deviceProfile = null;
+                frameConsumer = null;
             }
         }, "usb-hid-reader");
         readerThread.setDaemon(true);
@@ -234,35 +313,33 @@ public class UsbHidTransport implements Closeable {
     }
 
     @Override
-    public synchronized void close() {
+    public void close() {
         logger.debug("USB close: 开始关闭 USB 传输");
-        
-        // 第一步：设置标志，让读取线程自行退出并关闭 handles
-        logger.debug("USB close: 设置 running=false");
-        running = false;
-        
-        // 第二步：等待读取线程退出（最多等待2秒）
-        if (readerThread != null && readerThread.isAlive()) {
+        Thread reader;
+        synchronized (this) {
+            running = false;
+            reader = readerThread;
+            readerThread = null;
+            closeHandlesLocked();
+            devicePath = null;
+            deviceProfile = null;
+            frameConsumer = null;
+        }
+
+        if (reader != null && reader != Thread.currentThread() && reader.isAlive()) {
             logger.debug("USB close: 等待读取线程退出");
             try {
-                readerThread.join(2000);
+                reader.join(2000);
                 logger.debug("USB close: 读取线程已退出");
             } catch (InterruptedException e) {
                 logger.warn("USB close: 等待线程退出被中断");
                 Thread.currentThread().interrupt();
             }
         }
-        
-        // 第三步：清理引用（handles 已由读取线程关闭）
-        readHandle = null;
-        writeHandle = null;
-        devicePath = null;
-        readerThread = null;
         logger.debug("USB close: 关闭完成");
     }
 
-    private synchronized void closeQuietly() {
-        running = false;
+    private void closeHandlesLocked() {
         if (readHandle != null && !isInvalidHandle(readHandle)) {
             Kernel32.INSTANCE.CloseHandle(readHandle);
         }
@@ -271,25 +348,27 @@ public class UsbHidTransport implements Closeable {
         }
         readHandle = null;
         writeHandle = null;
-        devicePath = null;
     }
 
     private static boolean isInvalidHandle(Pointer h) {
         return h == null || Pointer.nativeValue(h) == 0 || Pointer.nativeValue(h) == -1;
     }
 
-    private static String findDevicePath() {
-        List<String> paths = listDevicePaths();
+    private static DeviceProfile findDeviceProfile() {
+        return findDeviceProfile(listDevicePaths());
+    }
+
+    static DeviceProfile findDeviceProfile(List<String> paths) {
         for (String path : paths) {
             String p = path.toLowerCase(Locale.ROOT);
             if (p.contains("vid_413c") && p.contains("pid_2107") && (p.contains("mi_01") || p.contains("col02"))) {
-                return path;
+                return new DeviceProfile(path, (byte) 0, LEGACY_REPORT_LENGTH, true);
             }
         }
         for (String path : paths) {
             String p = path.toLowerCase(Locale.ROOT);
             if (p.contains("vid_413c") && p.contains("pid_2107")) {
-                return path;
+                return new DeviceProfile(path, (byte) 0, LEGACY_REPORT_LENGTH, true);
             }
         }
         return null;

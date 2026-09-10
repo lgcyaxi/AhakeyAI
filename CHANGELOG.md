@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.0.1 — 2026-09-04
+
+### Windows
+
+- Do not mistake the `2CA3:4011` DJI microphone receiver's vendor HID
+  collections for an AhaKey configuration channel. A legacy USB candidate
+  must still return a valid AhaKey status frame before it can be used.
+- Stop stale scanning states and show unknown battery data as `—` instead of
+  inventing a value.
+- Distinguish the Windows microphone audio path from the AhaKey configuration
+  path in connection guidance.
+- Build the loopback-only BLE configuration bridge with the Java app image and
+  require both its executable and runtime configuration file.
+
 ## v0.1.1-alpha — 2026-05-03
 
 macOS 客户端从 baseline 迁入阶段进入活跃功能开发期。本版本主要新增 Voice Agent 体系、飞书集成与 Agent 工作台。

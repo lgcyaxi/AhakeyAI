@@ -12,6 +12,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
@@ -21,6 +22,7 @@ public class BleManager {
     private static final String DEFAULT_HOST = "127.0.0.1";
     private static final int DEFAULT_PORT = 9000;
     private static final long RESPONSE_TIMEOUT_MS = 15000;
+    private static final long USB_HANDSHAKE_TIMEOUT_MS = 2000;
 
     private final String host;
     private final int port;
@@ -41,7 +43,30 @@ public class BleManager {
     private DeviceStatus cachedStatus = new DeviceStatus();
     private volatile long lastStatusUpdateTime = 0;  // 最后一次状态更新时间
 
+    public record DiscoveredDevice(String id, String name, String mac) {
+        @Override public String toString() { return name == null || name.isBlank() ? "未命名设备" : name; }
+    }
+    public record DiscoverySnapshot(java.util.List<DiscoveredDevice> devices, String state, String error) {}
+    private volatile java.util.function.Consumer<DiscoverySnapshot> discoveryListener = value -> {};
+    private volatile DiscoverySnapshot discovery = new DiscoverySnapshot(java.util.List.of(), "disconnected", "");
+    public void setDeviceDiscoveryListener(java.util.function.Consumer<DiscoverySnapshot> listener) {
+        discoveryListener = listener == null ? value -> {} : listener;
+        discoveryListener.accept(discovery);
+    }
+    public void requestDevices() { deviceControl((byte) 0x05, new byte[0]); }
+    public void rescanDevices() { deviceControl((byte) 0x07, new byte[0]); }
+    public void disconnectDevice() { deviceControl((byte) 0x08, new byte[0]); }
+    public void selectDevice(String id) {
+        if (id != null && !id.isBlank()) deviceControl((byte) 0x06, id.getBytes(StandardCharsets.UTF_8));
+    }
+    private void deviceControl(byte type, byte[] payload) {
+        if (!isTcpTransportConnected()) return;
+        try { writePacket(type, payload); }
+        catch (IOException ex) { discoveryListener.accept(new DiscoverySnapshot(discovery.devices(), "error", "后台连接已断开，请重新连接")); }
+    }
+
     public interface BleCallback {
+        void onTransportReady();
         void onConnected();
         void onDisconnected();
         void onStatusReceived(DeviceStatus status);
@@ -75,6 +100,17 @@ public class BleManager {
         if (isScanning) {
             return;
         }
+        if (usbTransport.isOpen()) {
+            isScanning = false;
+            callback.onConnected();
+            queryStatus();
+            return;
+        }
+        if (isTcpTransportConnected()) {
+            isScanning = true;
+            queryStatus();
+            return;
+        }
         isScanning = true;
         new Thread(() -> {
             closeTcpOnly();
@@ -90,23 +126,22 @@ public class BleManager {
                 inputStream = socket.getInputStream();
                 isConnected = true;
                 isScanning = false;
-                cachedStatus.setConnected(false);
-                cachedStatus.setDeviceName("Waiting for device");
-                if (cachedStatus.getBatteryLevel() < 0) {
-                    cachedStatus.setBatteryLevel(50);
-                }
-                if (cachedStatus.getSwitchState() < 0) {
-                    cachedStatus.setSwitchState(1);
-                }
+                lastStatusUpdateTime = 0;
+                resetCachedDeviceStatus("等待设备");
                 logger.info("BLE bridge connected - {}:{}", host, port);
                 startReader();
+                callback.onTransportReady();
                 queryBridgeDeviceInfo();
             } catch (IOException e) {
                 isScanning = false;
                 isConnected = false;
-                cachedStatus.setConnected(false);
+                resetCachedDeviceStatus("等待设备");
+                closeTcpOnly();
                 logger.warn("BLE bridge connect failed - {}:{}: {}", host, port, e.getMessage());
-                callback.onError("BLE bridge connect failed (" + host + ":" + port + "): " + e.getMessage());
+                callback.onError(
+                    "未连接到 AhaKey 配置通道。Windows 麦克风是音频通道，不代表配置通道已连接。" +
+                    "请在‘设备’页刷新并选择键盘后重试。详情: " + e.getMessage()
+                );
             }
         }, "device-connect").start();
     }
@@ -116,7 +151,9 @@ public class BleManager {
         // 第一步：立即标记断开状态，阻止新操作
         logger.debug("步骤1: 设置断开状态");
         isConnected = false;
-        cachedStatus.setConnected(false);
+        isScanning = false;
+        resetCachedDeviceStatus("等待设备");
+        lastStatusUpdateTime = 0;
         
         // 第二步：唤醒等待响应的线程
         logger.debug("步骤2: 唤醒等待响应的线程");
@@ -179,6 +216,9 @@ public class BleManager {
             outputStream = null;
             socket = null;
             readerThread = null;
+            if (!usbTransport.isOpen()) {
+                isConnected = false;
+            }
         }
     }
 
@@ -276,6 +316,7 @@ public class BleManager {
             // 查询设备状态
             writePacket(BleTcpPacket.WRITE_COMMAND, AhaKeyProtocol.queryDeviceStatus());
         } catch (IOException e) {
+            isScanning = false;
             callback.onError("查询设备状态失败: " + e.getMessage());
         }
     }
@@ -359,6 +400,10 @@ public class BleManager {
         return usbTransport.isOpen();
     }
 
+    public boolean isTransportConnected() {
+        return usbTransport.isOpen() || isTcpTransportConnected();
+    }
+
     public String selectPreferredTransport() throws IOException {
         if (ensureUsbConnected()) {
             return "USB";
@@ -389,18 +434,20 @@ public class BleManager {
             if (!UsbHidTransport.isPresent()) {
                 return false;
             }
+            byte[] statusFrame = usbTransport.openValidated(
+                AhaKeyProtocol.queryDeviceStatus(),
+                BleManager::isValidUsbStatusFrame,
+                this::onBleNotify,
+                USB_HANDSHAKE_TIMEOUT_MS
+            );
             closeTcpOnly();
-            usbTransport.open(this::onBleNotify);
             isConnected = true;
             isScanning = false;
-            cachedStatus.setConnected(true);
-            cachedStatus.setDeviceName("AhaKey USB");
-            cachedStatus.setBatteryLevel(100);
+            onBleNotify(statusFrame);
             callback.onConnected();
-            queryBridgeDeviceInfo();
             return true;
         } catch (Exception e) {
-            logger.warn("USB HID connect failed: {}", e.getMessage());
+            logger.info("USB HID candidate did not prove a configuration channel: {}", e.getMessage());
             usbTransport.close();
             return false;
         }
@@ -410,24 +457,41 @@ public class BleManager {
         if (usbTransport.isOpen()) {
             return true;
         }
+        if (isTcpTransportConnected()) {
+            return false;
+        }
         if (!UsbHidTransport.isPresent()) {
             return false;
         }
-        try {
-            closeTcpOnly();
-            usbTransport.open(this::onBleNotify);
-            isConnected = true;
-            isScanning = false;
-            cachedStatus.setConnected(true);
-            cachedStatus.setDeviceName("AhaKey USB");
-            cachedStatus.setBatteryLevel(100);
-            callback.onConnected();
-            return true;
-        } catch (Exception e) {
-            logger.warn("USB HID reconnect failed: {}", e.getMessage());
-            usbTransport.close();
-            return false;
-        }
+        return tryConnectUsb();
+    }
+
+    static boolean isValidUsbStatusFrame(byte[] frame) {
+        DeviceStatus status = AhaKeyProtocol.parseDeviceStatus(frame);
+        return isValidDeviceStatus(status);
+    }
+
+    private boolean isTcpTransportConnected() {
+        Socket current = socket;
+        return isConnected && current != null && current.isConnected() && !current.isClosed()
+            && outputStream != null && inputStream != null;
+    }
+
+    private static boolean isValidDeviceStatus(DeviceStatus status) {
+        return status != null
+            && status.getBatteryLevel() >= 0 && status.getBatteryLevel() <= 100
+            && status.getWorkMode() >= 0 && status.getWorkMode() <= 3
+            && status.getSwitchState() >= 0 && status.getSwitchState() <= 1;
+    }
+
+    private void resetCachedDeviceStatus(String deviceName) {
+        cachedStatus.setConnected(false);
+        cachedStatus.setBatteryLevel(-1);
+        cachedStatus.setSignal(-1);
+        cachedStatus.setFirmwareMain(-1);
+        cachedStatus.setFirmwareSub(-1);
+        cachedStatus.setSwitchState(-1);
+        cachedStatus.setDeviceName(deviceName);
     }
     private void writePacket(byte type, byte[] data) throws IOException {
         if (!isConnected || outputStream == null) {
@@ -528,76 +592,73 @@ public class BleManager {
     private void handlePacket(byte type, byte[] data) {
         logger.debug("收到 TCP 包: type=0x{}, len={}", Integer.toHexString(type & 0xFF), data == null ? 0 : data.length);
         switch (type) {
+            case (byte) 0x84 -> {
+                try {
+                    var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(data);
+                    var items = new java.util.ArrayList<DiscoveredDevice>();
+                    for (var item : json.path("devices")) items.add(new DiscoveredDevice(
+                        item.path("id").asText(), item.path("name").asText(), item.path("mac").asText()));
+                    discovery = new DiscoverySnapshot(java.util.List.copyOf(items), json.path("state").asText("disconnected"), json.path("error").asText(""));
+                    discoveryListener.accept(discovery);
+                } catch (IOException | RuntimeException ex) { logger.warn("Invalid BLE discovery response"); }
+            }
+            case (byte) 0x85 -> {
+                try {
+                    var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(data);
+                    if (!json.path("ok").asBoolean()) discoveryListener.accept(new DiscoverySnapshot(discovery.devices(), "error", json.path("message").asText("操作未完成")));
+                    else requestDevices();
+                } catch (IOException | RuntimeException ex) { logger.warn("Invalid BLE control response"); }
+            }
             case BleTcpPacket.BLE_NOTIFY -> onBleNotify(data);
             case BleTcpPacket.DEVICE_INFO_RESP -> {
-                if (data != null && data.length >= 8) {
+                if (data != null && data.length >= 8 && cachedStatus.isConnected()) {
                     int battery = data[0] & 0xFF;
                     int workMode = data[4] & 0xFF;
                     int switchState = data[6] & 0xFF;
-                    
-                    // 验证数据有效性
                     boolean isValidBattery = battery >= 0 && battery <= 100;
                     boolean isValidWorkMode = workMode >= 0 && workMode <= 3;
-                    
+                    boolean isValidSwitchState = switchState >= 0 && switchState <= 1;
+
                     logger.info("收到设备信息 - 电量: {}, 工作模式: {}, 拨杆: {}, 有效: {}", 
-                        battery, workMode, switchState, isValidBattery && isValidWorkMode);
-                    
-                    // 更新最后状态更新时间
+                        battery, workMode, switchState,
+                        isValidBattery && isValidWorkMode && isValidSwitchState);
+                    if (!isValidBattery || !isValidWorkMode || !isValidSwitchState) {
+                        return;
+                    }
+
                     lastStatusUpdateTime = System.currentTimeMillis();
-                    
-                    // 更新缓存状态
                     cachedStatus.setBatteryLevel(battery);
                     cachedStatus.setWorkMode(workMode);
                     cachedStatus.setSwitchState(switchState);
-                    
-                    // 如果数据有效，确保标记为已连接
-                    if (isValidBattery && isValidWorkMode) {
-                        cachedStatus.setConnected(true);
-                        cachedStatus.setDeviceName("AhaKey Keyboard");
-                    }
-                    
                     callback.onStatusReceived(cachedStatus);
                 }
             }
             case BleTcpPacket.BLE_STATUS_RESP -> {
-                if (data != null && data.length > 0) {
-                    // 解析BLE状态响应（参考Python的parse_status_response）
-                    // 格式: [connected:1][name_len:1][name:N][mac_len:1][mac:N][is_target:1]
-                    boolean bleConnected = (data[0] & 0xFF) == 1;
-                    String deviceName = "等待设备";
-                    
-                    if (data.length >= 3) {
-                        int nameLen = data[1] & 0xFF;
-                        if (nameLen > 0 && data.length >= 2 + nameLen) {
-                            deviceName = new String(data, 2, nameLen);
-                        }
-                    }
-                    
-                    logger.info("BLE状态响应 - 连接: {}, 设备名: {}", bleConnected, deviceName);
-                    
-                    // 更新心跳时间戳（收到BLE状态响应也算作状态更新）
+                BridgeStatus bridgeStatus = parseBridgeStatus(data);
+                if (bridgeStatus != null) {
+                    boolean configurationReady = bridgeStatus.connected() && bridgeStatus.targetDevice();
+                    String deviceName = bridgeStatus.deviceName().isBlank() ? "等待设备" : bridgeStatus.deviceName();
+                    logger.info(
+                        "BLE状态响应 - 系统连接: {}, 配置特征就绪: {}, 设备名: {}",
+                        bridgeStatus.connected(), bridgeStatus.targetDevice(), deviceName
+                    );
+
+                    isScanning = false;
                     lastStatusUpdateTime = System.currentTimeMillis();
-                    
                     boolean wasConnected = cachedStatus.isConnected();
-                    cachedStatus.setConnected(bleConnected);
-                    cachedStatus.setDeviceName(bleConnected ? deviceName : "等待设备");
-                    
-                    // 如果是从断开变为连接，通知回调
-                    if (bleConnected && !wasConnected) {
+                    if (!configurationReady) {
+                        resetCachedDeviceStatus(
+                            bridgeStatus.connected() ? deviceName + "（配置通道未就绪）" : "等待设备"
+                        );
+                        callback.onStatusReceived(cachedStatus);
+                        return;
+                    }
+
+                    cachedStatus.setConnected(true);
+                    cachedStatus.setDeviceName(deviceName);
+                    if (!wasConnected) {
                         callback.onConnected();
                     }
-                    
-                    // 如果是从连接变为断开，更新状态并唤醒等待线程
-                    if (!bleConnected && wasConnected) {
-                        isConnected = false;
-                        commandLock.lock();
-                        try {
-                            responseReady.signalAll();
-                        } finally {
-                            commandLock.unlock();
-                        }
-                    }
-                    
                     callback.onStatusReceived(cachedStatus);
                 }
             }
@@ -606,10 +667,33 @@ public class BleManager {
         }
     }
 
+    private record BridgeStatus(boolean connected, String deviceName, boolean targetDevice) {
+    }
+
+    private static BridgeStatus parseBridgeStatus(byte[] data) {
+        if (data == null || data.length < 4) {
+            return null;
+        }
+        boolean connected = (data[0] & 0xFF) == 1;
+        int nameLength = data[1] & 0xFF;
+        int offset = 2;
+        if (offset + nameLength >= data.length) {
+            return null;
+        }
+        String deviceName = new String(data, offset, nameLength, StandardCharsets.UTF_8);
+        offset += nameLength;
+        int macLength = data[offset++] & 0xFF;
+        if (offset + macLength >= data.length) {
+            return null;
+        }
+        offset += macLength;
+        boolean targetDevice = (data[offset] & 0xFF) == 1;
+        return new BridgeStatus(connected, deviceName, targetDevice);
+    }
+
     private void onBleNotify(byte[] data) {
         logger.debug("收到 BLE NOTIFY 通知，数据长度: {}", data.length);
-        lastStatusUpdateTime = System.currentTimeMillis();
-        
+
         // 打印前16字节的十六进制数据
         StringBuilder hex = new StringBuilder();
         for (int i = 0; i < Math.min(data.length, 16); i++) {
@@ -628,7 +712,8 @@ public class BleManager {
             return;
         }
         DeviceStatus status = AhaKeyProtocol.parseDeviceStatus(data);
-        if (status != null) {
+        if (isValidDeviceStatus(status)) {
+            lastStatusUpdateTime = System.currentTimeMillis();
             logger.info("解析到设备状态 - 电量: {}, 工作模式: {}, 拨杆状态: {}", 
                 status.getBatteryLevel(), 
                 status.getWorkMode(), 
@@ -677,4 +762,3 @@ public class BleManager {
         return true;
     }
 }
-

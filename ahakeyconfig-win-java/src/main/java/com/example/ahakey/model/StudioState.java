@@ -60,45 +60,24 @@ public class StudioState {
     private KeyConfig createVoiceKey(int hidCode, String description, VoicePreset preset) {
         KeyConfig key = new KeyConfig(hidCode, description);
         key.setVoicePreset(preset);
+        key.setVoiceTriggerMode(VoiceTriggerMode.defaultFor(preset));
         return key;
     }
 
     private void resetModeDefaults(ModeSlot mode) {
         EnumMap<StudioPart, KeyConfig> map = keyConfigs.get(mode);
         oledDrafts.putIfAbsent(mode, new OledModeDraft());
-        if (mode == ModeSlot.MODE0) {
-            map.put(StudioPart.KEY1, createVoiceKey(HIDUsage.F18, "Record", VoicePreset.WINDOWS_NATIVE));
-            map.put(StudioPart.KEY2, createKey(HIDUsage.getCode("Y"), "Approve"));
-            map.put(StudioPart.KEY3, createKey(HIDUsage.getCode("N"), "Reject"));
-            map.put(StudioPart.KEY4, createKey(HIDUsage.BACKSPACE, "Backspace"));
-            oledSummaries.put(mode, new SimpleStringProperty("Claude"));
-            oledCaptions.put(mode, new SimpleStringProperty("Mode 1"));
-            lightBarSummaries.put(mode, new SimpleStringProperty("AI 状态灯效"));
-        } else if (mode == ModeSlot.MODE1) {
-            map.put(StudioPart.KEY1, createVoiceKey(HIDUsage.F17, "Transcribe", VoicePreset.WINDOWS_NATIVE));
-            map.put(StudioPart.KEY2, createKey(HIDUsage.getCode("Y"), "Yes"));
-            map.put(StudioPart.KEY3, createKey(HIDUsage.ESCAPE, "Cancel"));
-            map.put(StudioPart.KEY4, createKey(HIDUsage.BACKSPACE, "Backspace"));
-            oledSummaries.put(mode, new SimpleStringProperty("Cursor"));
-            oledCaptions.put(mode, new SimpleStringProperty("Mode 2"));
-            lightBarSummaries.put(mode, new SimpleStringProperty("AI 状态灯效"));
-        } else if (mode == ModeSlot.MODE2) {
-            map.put(StudioPart.KEY1, createVoiceKey(HIDUsage.F18, "Record", VoicePreset.WINDOWS_NATIVE));
-            map.put(StudioPart.KEY2, createKey(HIDUsage.getCode("Y"), "Accept"));
-            map.put(StudioPart.KEY3, createKey(HIDUsage.getCode("N"), "Decline"));
-            map.put(StudioPart.KEY4, createKey(HIDUsage.BACKSPACE, "Backspace"));
-            oledSummaries.put(mode, new SimpleStringProperty("Codex"));
-            oledCaptions.put(mode, new SimpleStringProperty("Mode 3"));
-            lightBarSummaries.put(mode, new SimpleStringProperty("AI 状态灯效"));
-        } else {
-            map.put(StudioPart.KEY1, createKey(0, "N/A"));
-            map.put(StudioPart.KEY2, createKey(0, "N/A"));
-            map.put(StudioPart.KEY3, createKey(0, "N/A"));
-            map.put(StudioPart.KEY4, createKey(HIDUsage.BACKSPACE, "Backspace"));
-            oledSummaries.put(mode, new SimpleStringProperty("N/A"));
-            oledCaptions.put(mode, new SimpleStringProperty("Mode 4"));
-            lightBarSummaries.put(mode, new SimpleStringProperty("AI 状态灯效"));
-        }
+        boolean desktop = mode == ModeSlot.MODE1 || mode == ModeSlot.MODE3;
+        map.put(StudioPart.KEY1, createVoiceKey(mode == ModeSlot.MODE1 ? HIDUsage.F17 : HIDUsage.F18,
+            "Record", VoicePreset.WECHAT));
+        map.put(StudioPart.KEY2, createKey(desktop ? HIDUsage.getCode("Enter") : HIDUsage.getCode("Y"),
+            desktop ? "Confirm / Send" : "Approve"));
+        map.put(StudioPart.KEY3, createKey(desktop ? HIDUsage.ESCAPE : HIDUsage.getCode("N"),
+            desktop ? "Cancel" : "Reject"));
+        map.put(StudioPart.KEY4, createKey(HIDUsage.BACKSPACE, "Backspace"));
+        oledSummaries.put(mode, new SimpleStringProperty(mode.getShortName()));
+        oledCaptions.put(mode, new SimpleStringProperty(mode.getTitle()));
+        lightBarSummaries.put(mode, new SimpleStringProperty("AI 状态灯效"));
         resetAiLightDefaults(mode);
     }
 
@@ -356,6 +335,10 @@ public class StudioState {
     }
 
     public void loadFromPersisted(PersistedDraft draft) {
+        boolean profilesMigrated = draft.profileSchemaVersion < 2;
+        migrateProfiles(draft);
+        selectedMode.set(ModeSlot.fromIndex(draft.selectedModeIndex));
+        boolean migratedVoiceConfiguration = profilesMigrated;
         for (int i = 0; i < ModeSlot.values().length; i++) {
             ModeSlot mode = ModeSlot.values()[i];
             PersistedDraft.ModeDraft md = draft.modes[i];
@@ -373,11 +356,37 @@ public class StudioState {
             od.setStatusLine(md.oledSummary);
             od.setCaptionLine(md.oledCaption);
             var k1 = map.get(StudioPart.KEY1);
+            VoicePreset voicePreset = k1.getVoicePreset();
             if (md.voicePresetId != null) {
                 try {
-                    k1.setVoicePreset(VoicePreset.valueOf(md.voicePresetId));
+                    voicePreset = VoicePreset.valueOf(md.voicePresetId);
                 } catch (IllegalArgumentException ignored) {
-                    k1.setVoicePreset(VoicePreset.WINDOWS_NATIVE);
+                    voicePreset = VoicePreset.WINDOWS_NATIVE;
+                    migratedVoiceConfiguration = true;
+                }
+            }
+            // Older Windows builds forced Key1 to CUSTOM while still treating
+            // the factory F17/F18 bindings as Windows Voice Typing routes.
+            if (voicePreset == VoicePreset.CUSTOM
+                && (k1.getHidCode() == HIDUsage.F17 || k1.getHidCode() == HIDUsage.F18)) {
+                voicePreset = VoicePreset.WINDOWS_NATIVE;
+                migratedVoiceConfiguration = true;
+            }
+            k1.setVoicePreset(voicePreset);
+            VoiceTriggerMode triggerMode = VoiceTriggerMode.defaultFor(voicePreset);
+            if (md.voiceTriggerModeId != null) {
+                try {
+                    triggerMode = VoiceTriggerMode.valueOf(md.voiceTriggerModeId);
+                } catch (IllegalArgumentException ignored) {
+                    migratedVoiceConfiguration = true;
+                }
+            }
+            k1.setVoiceTriggerMode(triggerMode);
+            if (voicePreset.locksShortcut()) {
+                int normalizedHid = voicePreset.windowsHidCode(mode, k1.getHidCode());
+                if (normalizedHid != k1.getHidCode()) {
+                    k1.setHidCode(normalizedHid);
+                    migratedVoiceConfiguration = true;
                 }
             }
         }
@@ -398,10 +407,16 @@ public class StudioState {
         revision.set(draft.revision);
         dirtyParts.clear();
         dirtyCount.set(0);
+        if (migratedVoiceConfiguration) {
+            markDirty(StudioPart.KEY1);
+            syncStatus.set("已迁移旧版 Key1 语音配置，请保存配置后写入键盘。");
+        }
     }
 
     public PersistedDraft toPersisted() {
         PersistedDraft d = new PersistedDraft();
+        d.profileSchemaVersion = 2;
+        d.selectedModeIndex = selectedMode.get().getIndex();
         d.revision = revision.get();
         d.lightBarPreviewId = lightBarPreview.get().getId();
         d.lightBrightness = lightBrightness.get();
@@ -423,6 +438,7 @@ public class StudioState {
             md.oledFps = od.getFramesPerSecond();
             md.oledFrameCount = od.getFrameCount();
             md.voicePresetId = getKeyConfig(mode, StudioPart.KEY1).getVoicePreset().name();
+            md.voiceTriggerModeId = getKeyConfig(mode, StudioPart.KEY1).getVoiceTriggerMode().name();
             md.aiLightEffectIds = new String[IDEState.values().length];
             for (IDEState state : IDEState.values()) {
                 md.aiLightEffectIds[state.getCode()] = getAiLightEffect(mode, state).getId();
@@ -432,8 +448,33 @@ public class StudioState {
         return d;
     }
 
+    private static void migrateProfiles(PersistedDraft draft) {
+        if (draft.profileSchemaVersion >= 2 || draft.modes == null) return;
+        PersistedDraft defaults = PersistedDraft.defaults();
+        String[] legacyNames = {"Claude", "Cursor", "Codex", "N/A"};
+        for (int i = 0; i < Math.min(4, draft.modes.length); i++) {
+            var mode = draft.modes[i];
+            if (mode == null) { draft.modes[i] = defaults.modes[i]; continue; }
+            // Only migrate untouched factory values. A user-defined Enter,
+            // custom shortcut, description, voice route or OLED survives.
+            if (i == 1 && "Cursor".equals(mode.oledSummary)
+                && mode.key2Hid == HIDUsage.getCode("Y") && "Yes".equals(mode.key2Desc)) {
+                mode.key2Hid = HIDUsage.getCode("Enter"); mode.key2Desc = "Confirm / Send";
+            }
+            if (i == 3 && mode.key1Hid == 0 && mode.key2Hid == 0 && mode.key3Hid == 0
+                && "N/A".equals(mode.oledSummary)) {
+                draft.modes[i] = defaults.modes[i]; continue;
+            }
+            if (legacyNames[i].equals(mode.oledSummary)) mode.oledSummary = ModeSlot.values()[i].getShortName();
+            if (("Mode " + (i + 1)).equals(mode.oledCaption)) mode.oledCaption = ModeSlot.values()[i].getTitle();
+        }
+        draft.profileSchemaVersion = 2;
+    }
+
     /** JSON 持久化 DTO，字段名稳定供 Jackson 使用。 */
     public static class PersistedDraft {
+        public int profileSchemaVersion;
+        public int selectedModeIndex;
         public int revision;
         public String lightBarPreviewId = LightBarPreviewState.AI_RUNNING.getId();
         public int lightBrightness = 35;
@@ -459,8 +500,8 @@ public class StudioState {
             public int oledFps = 10;
             public int oledFrameCount;
             public String voicePresetId = VoicePreset.CUSTOM.name();
+            public String voiceTriggerModeId;
             public String[] aiLightEffectIds;
         }
     }
 }
-

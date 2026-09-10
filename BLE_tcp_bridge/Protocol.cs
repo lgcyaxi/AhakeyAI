@@ -14,11 +14,20 @@ namespace BLE_tcp_driver
         WriteCommand    = 0x02,  // 写命令到BLE 0x7343
         QueryBleStatus  = 0x03,  // 查询BLE连接状态
         QueryDeviceInfo = 0x04,  // 查询设备状态信息
+        ListDevices     = 0x05,
+        SelectDevice    = 0x06,
+        ScanDevices     = 0x07,
+        DisconnectDevice = 0x08,
+        QueryBridgeInfo = 0x09,
+        ShutdownBridge = 0x0A,
 
         // 服务器 → 客户端
         BleNotify       = 0x81,  // BLE通知数据 (来自0x7344)
         BleStatusResp   = 0x82,  // BLE连接状态响应
         DeviceInfoResp  = 0x83,  // 设备状态信息响应
+        DeviceListResp  = 0x84,
+        DeviceControlResp = 0x85,
+        BridgeInfoResp = 0x86,
     }
 
     /// <summary>
@@ -58,6 +67,7 @@ namespace BLE_tcp_driver
         public static byte[] BuildPacket(PacketType type, byte[] data = null)
         {
             int len = data?.Length ?? 0;
+            if (len > ushort.MaxValue) throw new ArgumentOutOfRangeException(nameof(data));
             byte[] packet = new byte[3 + len];
             packet[0] = (byte)type;
             packet[1] = (byte)(len & 0xFF);
@@ -129,7 +139,7 @@ namespace BLE_tcp_driver
         /// </summary>
         public static bool IsClaudeStatusUpload(byte[] data)
         {
-            if (data == null) return false;
+            if (data == null || data.Length < 3) return false;
             return data[0] == 0xAA && data[1] == 0xBB && data[2] == 0x90;
         }
 

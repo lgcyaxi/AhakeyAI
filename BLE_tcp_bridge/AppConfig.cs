@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -11,28 +12,63 @@ namespace BLE_tcp_driver
     {
         public string BleName { get; set; } = "";
         public string BleMac { get; set; } = "";
-        public string ServerIP { get; set; } = "0.0.0.0";
+        public string ServerIP { get; set; } = "127.0.0.1";
         public int ServerPort { get; set; } = 9000;
         public bool StartMinimized { get; set; } = false;
 
         public bool HasSavedDevice => !string.IsNullOrEmpty(BleName) && !string.IsNullOrEmpty(BleMac);
 
+        private static readonly string ConfigDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "AhaKey Studio",
+            "ble-driver");
+
         private static readonly string ConfigPath = Path.Combine(
-            Path.GetDirectoryName(Application.ExecutablePath), "config_server.json");
+            ConfigDirectory,
+            "config_server.json");
 
         public static AppConfig Load()
         {
-            if (!File.Exists(ConfigPath))
-                return CreateDefault();
+            AppConfig stable = TryLoad(ConfigPath);
+            if (stable != null && stable.HasSavedDevice)
+                return stable;
 
+            AppConfig fallback = stable;
+            foreach (string legacyPath in LegacyConfigPaths())
+            {
+                AppConfig legacy = TryLoad(legacyPath);
+                if (legacy == null)
+                    continue;
+                if (fallback == null)
+                    fallback = legacy;
+                if (legacy.HasSavedDevice)
+                {
+                    legacy.Save();
+                    Console.WriteLine("已迁移旧版 BLE 设备配置到稳定的用户目录。");
+                    return legacy;
+                }
+            }
+
+            if (fallback != null)
+            {
+                fallback.Save();
+                return fallback;
+            }
+            return CreateDefault();
+        }
+
+        private static AppConfig TryLoad(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !File.Exists(path))
+                return null;
             try
             {
-                string json = File.ReadAllText(ConfigPath, Encoding.UTF8);
+                string json = File.ReadAllText(path, Encoding.UTF8);
                 var config = new AppConfig();
                 config.BleName = JsonExtractString(json, "BleName");
                 config.BleMac = JsonExtractString(json, "BleMac");
-                config.ServerIP = JsonExtractString(json, "ServerIP");
-                if (string.IsNullOrEmpty(config.ServerIP)) config.ServerIP = "0.0.0.0";
+                // The bridge is a local control surface, never a LAN service.
+                config.ServerIP = "127.0.0.1";
                 config.ServerPort = JsonExtractInt(json, "ServerPort", 9000);
                 config.StartMinimized = JsonExtractBool(json, "StartMinimized", false);
                 return config;
@@ -40,7 +76,36 @@ namespace BLE_tcp_driver
             catch (Exception ex)
             {
                 Console.WriteLine("配置文件读取失败: " + ex.Message);
-                return CreateDefault();
+                return null;
+            }
+        }
+
+        private static IEnumerable<string> LegacyConfigPaths()
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string executableDirectory = Path.GetDirectoryName(Application.ExecutablePath);
+            string localAppData = Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData);
+            string[] candidates =
+            {
+                Path.Combine(executableDirectory ?? "", "config_server.json"),
+                Path.Combine(localAppData, "Programs", "AhaKey Studio", "config_server.json"),
+                Path.Combine(localAppData, "Programs", "AhaKeyStudio", "config_server.json")
+            };
+            foreach (string candidate in candidates)
+            {
+                string fullPath;
+                try
+                {
+                    fullPath = Path.GetFullPath(candidate);
+                }
+                catch
+                {
+                    continue;
+                }
+                if (!string.Equals(fullPath, ConfigPath, StringComparison.OrdinalIgnoreCase)
+                    && seen.Add(fullPath))
+                    yield return fullPath;
             }
         }
 
@@ -48,6 +113,7 @@ namespace BLE_tcp_driver
         {
             try
             {
+                Directory.CreateDirectory(ConfigDirectory);
                 var sb = new StringBuilder();
                 sb.AppendLine("{");
                 sb.AppendLine($"  \"BleName\": \"{JsonEscape(BleName)}\",");

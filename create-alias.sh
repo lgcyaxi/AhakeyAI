@@ -9,5 +9,5 @@ echo "现在可以使用 'cursor' 命令来自动批准执行命令"
 # 测试新别名
 echo "\n测试新别名："
 cursor --print << 'EOF'
-请执行 python3 /Users/cjn/Desktop/keyboard1/ahakeyconfig/helloworld.py
+请执行 python3 --version
 EOF

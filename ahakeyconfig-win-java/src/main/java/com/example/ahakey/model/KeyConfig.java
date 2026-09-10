@@ -7,12 +7,14 @@ public class KeyConfig {
     private int hidCode;
     private String description;
     private VoicePreset voicePreset;
+    private VoiceTriggerMode voiceTriggerMode;
     private List<MacroStep> macro;
     
     public KeyConfig() {
         this.hidCode = 0;
         this.description = "";
         this.voicePreset = VoicePreset.CUSTOM;
+        this.voiceTriggerMode = VoiceTriggerMode.defaultFor(this.voicePreset);
         this.macro = new ArrayList<>();
     }
     
@@ -20,6 +22,7 @@ public class KeyConfig {
         this.hidCode = hidCode;
         this.description = description;
         this.voicePreset = VoicePreset.CUSTOM;
+        this.voiceTriggerMode = VoiceTriggerMode.defaultFor(this.voicePreset);
         this.macro = new ArrayList<>();
     }
     
@@ -45,6 +48,14 @@ public class KeyConfig {
     
     public void setVoicePreset(VoicePreset voicePreset) {
         this.voicePreset = voicePreset;
+    }
+
+    public VoiceTriggerMode getVoiceTriggerMode() {
+        return voiceTriggerMode;
+    }
+
+    public void setVoiceTriggerMode(VoiceTriggerMode voiceTriggerMode) {
+        this.voiceTriggerMode = voiceTriggerMode;
     }
     
     public List<MacroStep> getMacro() {

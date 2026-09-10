@@ -4,6 +4,8 @@ import com.example.ahakey.app.StudioController;
 import com.example.ahakey.model.DeviceStatus;
 import com.example.ahakey.model.StudioState;
 import com.example.ahakey.service.AgentManager;
+import com.example.ahakey.service.CodexHookConfig;
+import com.example.ahakey.service.HookEndpoint;
 import com.example.ahakey.service.VoiceInputManager;
 import com.example.ahakey.util.Icons;
 import javafx.application.Platform;
@@ -40,8 +42,14 @@ import javafx.animation.AnimationTimer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import java.util.ArrayList;
+import java.util.List;
 
 public class TopBar extends VBox {
+    private static final Logger logger = LoggerFactory.getLogger(TopBar.class);
+
     private final StudioController controller;
     private final DeviceStatus deviceStatus;
     private final StudioState studioState;
@@ -57,6 +65,11 @@ public class TopBar extends VBox {
     private volatile boolean isRecording = false;
     private volatile boolean voiceRunning = false;
     private FloatingVoiceNotification floatingNotification;  // 浮动通知窗口
+    private final Object bleDriverLock = new Object();
+    private volatile Process ownedBleDriverProcess;
+    private volatile boolean bleDriverStartInProgress;
+    private volatile boolean closing;
+    private final String bleLifecycleToken = java.util.UUID.randomUUID().toString();
 
     public TopBar(StudioController controller, DeviceStatus deviceStatus,
                   StudioState studioState, AgentManager agentManager) {
@@ -78,263 +91,85 @@ public class TopBar extends VBox {
         updateVoiceButtonState();
     }
 
-    private void initContent() {
-        Text titleIcon = Icons.keyboard("20");
-        Label titleLabel = new Label("AhaKey Studio");
-        titleLabel.getStyleClass().add("title");
-        HBox titleBox = new HBox(8);
-        titleBox.getChildren().addAll(titleIcon, titleLabel);
+    private VBox voiceWorkspace;
+    private Runnable openDeviceSettings = () -> {};
 
-        HBox infoPills = new HBox(10);
-        infoPills.getChildren().addAll(
-            new InfoPill(
-                Bindings.createStringBinding(
-                    () -> controller.isEffectivelyConnected() ? "已连接"
-                        : (deviceStatus.isScanning() ? "扫描中" : "未连接"),
-                    deviceStatus.isConnectedProperty(),
-                    deviceStatus.isScanningProperty()
-                ),
-                deviceStatus.deviceNameProperty(),
-                Bindings.createObjectBinding(
-                    () -> controller.isEffectivelyConnected() ? AccentColor.GREEN : AccentColor.ORANGE,
-                    deviceStatus.isConnectedProperty()
-                )
-            ),
-            new InfoPill(
-                Bindings.createStringBinding(() -> "电量"),
-                Bindings.createStringBinding(
-                    () -> controller.isEffectivelyConnected() ? deviceStatus.getBatteryLevel() + "%" : "—",
-                    deviceStatus.isConnectedProperty(),
-                    deviceStatus.batteryLevelProperty()
-                ),
-                Bindings.createObjectBinding(() -> AccentColor.BLUE)
-            ),
-            new InfoPill(
-                Bindings.createStringBinding(() -> "拨杆"),
-                Bindings.createStringBinding(deviceStatus::getSwitchTitle, deviceStatus.switchStateProperty()),
-                Bindings.createObjectBinding(
-                    () -> deviceStatus.isAutoApproval() ? AccentColor.MINT : AccentColor.INDIGO,
-                    deviceStatus.switchStateProperty()
-                )
-            )
-        );
-
-        // 操作按钮
-        Button connectButton = new Button();
-        connectButton.getStyleClass().add("button-connect");
-        connectButton.textProperty().bind(Bindings.createStringBinding(
-            () -> deviceStatus.isConnected() ? "断开连接" : "连接设备",
-            deviceStatus.isConnectedProperty()
-        ));
-        // 连接状态变化时切换按钮样式
-        deviceStatus.isConnectedProperty().addListener((obs, oldVal, newVal) -> {
-            connectButton.getStyleClass().removeAll("button-connect", "button-disconnect");
-            connectButton.getStyleClass().add(newVal ? "button-disconnect" : "button-connect");
+    public void setOpenDeviceSettings(Runnable action) { openDeviceSettings = action; }
+    public VBox getVoiceWorkspace() { return voiceWorkspace; }
+    public void showIntegrations() { showDeviceInfoDialog(); }
+    public void prepareCaptionForUtterance() {
+        var area = FloatingVoiceNotification.foregroundWorkArea();
+        Platform.runLater(() -> {
+            if (floatingNotification != null) floatingNotification.beginUtterance(area);
         });
-        connectButton.setOnAction(event -> {
-            if (deviceStatus.isConnected()) {
-                controller.userDisconnect();
-            } else {
-                controller.userConnect();
-            }
-        });
-
-        // BLE 驱动按钮
-        Button bleButton = new Button("BLE驱动");
-        bleButton.getStyleClass().add("button-ble");
-        bleButton.setOnAction(event -> handleBleButtonClick());
-
-        ToggleButton ahaTypeToggle = new ToggleButton();
-        ahaTypeToggle.getStyleClass().add("toggle-button");
-        ahaTypeToggle.textProperty().bind(Bindings.createStringBinding(
-            () -> studioState.ahaTypeEnabledProperty().get() ? "AhaType" : "AhaType",
-            studioState.ahaTypeEnabledProperty()
-        ));
-        ahaTypeToggle.selectedProperty().bindBidirectional(studioState.ahaTypeEnabledProperty());
-        ahaTypeToggle.selectedProperty().addListener((obs, oldValue, newValue) -> studioState.toggleAhaType(newValue));
-
-        // 语音启动按钮
-        voiceRecordButton = new Button("启动语音输入");
-        voiceRecordButton.getStyleClass().add("button-voice");
-        voiceRecordButton.setOnAction(event -> toggleVoiceService());
-        
-        // 语音状态指示灯
-        voiceStatusLamp = new VoiceStatusLamp();
-        
-        // 语音状态标签
-        voiceStatusLabel = new Label("语音未启动");
-        voiceStatusLabel.getStyleClass().add("voice-status");
-        
-        // 语音识别结果预览
-        voiceResultPreview = new Label("");
-        voiceResultPreview.getStyleClass().add("voice-preview");
-        
-        // 语音控制区域
-        VBox voiceControlBox = new VBox(4);
-        HBox voiceButtonRow = new HBox(8);
-        voiceButtonRow.getChildren().addAll(voiceRecordButton, voiceStatusLamp, voiceStatusLabel);
-        voiceControlBox.getChildren().addAll(voiceButtonRow, voiceResultPreview);
-
-        VBox ahaTypeStatus = createStatusBox(
-            studioState.ahaTypeEnabledProperty(),
-            Bindings.createStringBinding(
-                () -> studioState.ahaTypeEnabledProperty().get() ? "AhaType 开启" : "AhaType 关闭",
-                studioState.ahaTypeEnabledProperty()
-            ),
-            studioState.ahaTypeStatusProperty()
-        );
-
-        // 检查本地模型是否启用
-        boolean modelEnabled = com.example.ahakey.config.ModelConfig.getInstance().isEnabled();
-
-        VBox configStatus = createStatusBox(
-            Bindings.createBooleanBinding(agentManager::isEditingConfiguration, agentManager.bluetoothOwnerProperty()),
-            Bindings.createStringBinding(
-                () -> agentManager.isEditingConfiguration() ? "编辑配置中" : "键盘控制中",
-                agentManager.bluetoothOwnerProperty()
-            ),
-            Bindings.createStringBinding(
-                () -> agentManager.isEditingConfiguration()
-                    ? "正在编辑配置"
-                    : "键盘正常运行中",
-                agentManager.bluetoothOwnerProperty()
-            )
-        );
-
-        Button configModeButton = new Button();
-        configModeButton.getStyleClass().add("button-prominent");
-        configModeButton.textProperty().bind(Bindings.createStringBinding(controller::configurationModeButtonTitle,
-            studioState.syncingProperty(),
-            agentManager.bluetoothOwnerProperty()));
-        configModeButton.disableProperty().bind(Bindings.createBooleanBinding(
-            () -> studioState.syncingProperty().get() || agentManager.operationInProgressProperty().get(),
-            studioState.syncingProperty(),
-            agentManager.operationInProgressProperty()
-        ));
-        configModeButton.setOnAction(event -> controller.handleConfigurationModeButton());
-
-        Menu moreMenu = new Menu("更多");
-        Text moreIcon = Icons.moreHorizontal("16");
-        moreMenu.setGraphic(moreIcon);
-
-        MenuItem restoreDefaults = new MenuItem("恢复当前模式默认值");
-        restoreDefaults.setOnAction(event -> studioState.restoreCurrentModeDefaults());
-        MenuItem reconnect = new MenuItem("重新连接设备");
-        reconnect.setOnAction(event -> {
-            controller.userDisconnect();
-            controller.userConnect();
-        });
-        MenuItem clearOled = new MenuItem("清空 OLED 预览");
-        clearOled.setOnAction(event -> studioState.clearOledPreview());
-        SeparatorMenuItem divider1 = new SeparatorMenuItem();
-        MenuItem deviceInfo = new MenuItem("设备信息 · Hooks…");
-        deviceInfo.setOnAction(event -> showDeviceInfoDialog());
-        MenuItem cloudAccount = new MenuItem("云端账号 · AhaType…");
-        SeparatorMenuItem divider2 = new SeparatorMenuItem();
-        MenuItem refresh = new MenuItem("刷新 AhaType 状态");
-        refresh.setOnAction(event -> studioState.toggleAhaType(studioState.ahaTypeEnabledProperty().get()));
-
-        // 条件添加 AhaType 相关菜单项
-        if (modelEnabled) {
-            moreMenu.getItems().addAll(
-                restoreDefaults,
-                reconnect,
-                clearOled,
-                divider1,
-                deviceInfo,
-                cloudAccount,
-                divider2,
-                refresh
-            );
-        } else {
-            // 模型禁用时，隐藏 AhaType 相关菜单
-            moreMenu.getItems().addAll(
-                restoreDefaults,
-                reconnect,
-                clearOled,
-                divider1,
-                deviceInfo
-            );
-        }
-
-        MenuBar menuBar = new MenuBar(moreMenu);
-        menuBar.setUseSystemMenuBar(false);
-        menuBar.getStyleClass().add("toolbar-menu");
-
-        // 将操作按钮放入统一的 HBox
-        HBox actionButtons = new HBox(4);
-        actionButtons.setAlignment(Pos.CENTER_LEFT);
-        actionButtons.getChildren().addAll(connectButton, bleButton);
-
-        // 状态信息与操作按钮之间的固定间距
-        Region spacer = new Region();
-        spacer.setMinWidth(12);
-        spacer.setPrefWidth(16);
-        spacer.setMaxWidth(40);
-
-        // 主行 HBox：所有控件在一行，不会换行
-        HBox mainRow = new HBox(10);
-        mainRow.setAlignment(Pos.CENTER_LEFT);
-        mainRow.setPadding(new Insets(6, 16, 6, 16));
-        mainRow.setMinWidth(Region.USE_PREF_SIZE); // 保持首选宽度，不缩小
-        mainRow.getChildren().addAll(titleBox, infoPills, spacer, actionButtons);
-        if (modelEnabled) {
-            mainRow.getChildren().addAll(ahaTypeToggle, ahaTypeStatus, voiceControlBox);
-        } else {
-            // 隐藏语音相关控件
-            voiceRecordButton.setVisible(false);
-            voiceRecordButton.setManaged(false);
-            voiceStatusLamp.setVisible(false);
-            voiceStatusLamp.setManaged(false);
-            voiceStatusLabel.setVisible(false);
-            voiceStatusLabel.setManaged(false);
-            voiceResultPreview.setVisible(false);
-            voiceResultPreview.setManaged(false);
-        }
-        mainRow.getChildren().addAll(configStatus, configModeButton, menuBar);
-
-        // 右侧弹性 spacer：把编辑配置/菜单推到最右
-        Region rightSpacer = new Region();
-        HBox.setHgrow(rightSpacer, Priority.ALWAYS);
-        mainRow.getChildren().add(
-            mainRow.getChildren().size() - 3, rightSpacer  // 插到 configStatus 前面
-        );
-
-        // 包裹在水平 ScrollPane 中：宽屏时不显示滚动条，分屏窄时可水平滚动
-        ScrollPane scrollWrapper = new ScrollPane(mainRow);
-        scrollWrapper.setFitToWidth(true);
-        scrollWrapper.setFitToHeight(true);
-        scrollWrapper.setHbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
-        scrollWrapper.setVbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
-        scrollWrapper.setPannable(false);
-        scrollWrapper.setStyle("-fx-background: transparent; -fx-background-color: transparent;");
-        // 让 ScrollPane 内容背景透明
-        mainRow.setStyle("-fx-background-color: transparent;");
-
-        getChildren().add(scrollWrapper);
     }
-    
-    /**
-     * 处理 BLE 驱动按钮点击
-     * - 如果 BLE_tcp_driver.exe 已运行，弹窗提示
-     * - 否则启动同级目录下的 BLE_tcp_driver.exe
-     */
+    public void refreshVoiceAvailability() { updateVoiceButtonState(); }
+
+    private void initContent() {
+        Label title = new Label("AhaKey Studio");
+        title.getStyleClass().add("shell-brand");
+        Label version = new Label("1.1.1 · JavaFX");
+        version.getStyleClass().add("shell-muted");
+        Label connection = new Label();
+        connection.textProperty().bind(Bindings.createStringBinding(
+            () -> controller.isEffectivelyConnected()
+                ? "设备已连接 · " + (deviceStatus.getBatteryLevel() < 0 ? "电量未知" : deviceStatus.getBatteryLevel() + "%")
+                : "设备未就绪 · 语音可独立使用",
+            deviceStatus.isConnectedProperty(), deviceStatus.batteryLevelProperty()));
+        connection.getStyleClass().add("shell-muted");
+        Button device = new Button("设备设置");
+        device.setOnAction(e -> openDeviceSettings.run());
+        device.getStyleClass().add("shell-secondary");
+        Button save = new Button();
+        save.textProperty().bind(Bindings.createStringBinding(controller::configurationModeButtonTitle,
+            studioState.syncingProperty(), agentManager.bluetoothOwnerProperty()));
+        save.disableProperty().bind(studioState.syncingProperty());
+        save.setOnAction(e -> controller.handleConfigurationModeButton());
+        save.getStyleClass().add("shell-primary");
+        Region spacer = new Region(); HBox.setHgrow(spacer, Priority.ALWAYS);
+        HBox header = new HBox(12, title, version, spacer, connection, device, save);
+        header.setAlignment(Pos.CENTER_LEFT);
+        header.setPadding(new Insets(16, 24, 16, 24));
+        getChildren().add(header);
+
+        voiceRecordButton = new Button("启用 AhaKey 语音");
+        voiceRecordButton.getStyleClass().add("shell-primary");
+        voiceRecordButton.setOnAction(e -> toggleVoiceService());
+        voiceStatusLamp = new VoiceStatusLamp();
+        voiceStatusLabel = new Label("引擎随应用提供，模型可按需下载");
+        voiceStatusLabel.getStyleClass().add("shell-muted");
+        voiceResultPreview = new Label("录音时，这里和屏幕底部会更新临时字幕。\n松开按键后校正整句并输入到当前文本框。");
+        voiceResultPreview.setWrapText(true);
+        voiceResultPreview.setMaxWidth(Double.MAX_VALUE);
+        voiceResultPreview.setMinHeight(140);
+        voiceResultPreview.getStyleClass().add("transcript-preview");
+        Label heading = new Label("实时转写"); heading.getStyleClass().add("card-title");
+        Label note = new Label("本地识别不上传音频；豆包仅在你选择云端渠道后使用 API。");
+        note.setWrapText(true); note.getStyleClass().add("shell-muted");
+        HBox controls = new HBox(12, voiceRecordButton, voiceStatusLamp, voiceStatusLabel);
+        controls.setAlignment(Pos.CENTER_LEFT);
+        voiceWorkspace = new VBox(18, heading, note, voiceResultPreview, controls);
+        voiceWorkspace.getStyleClass().add("studio-card");
+    }
     private void handleBleButtonClick() {
-        if (isBleDriverRunning()) {
-            if (isBleBridgeReachable()) {
-                Alert alert = new Alert(Alert.AlertType.INFORMATION);
-                alert.setTitle("BLE 驱动");
-                alert.setHeaderText(null);
-                alert.setContentText("BLE 驱动已打开");
-                alert.showAndWait();
-            } else {
-                stopBleDriverProcess();
-                launchBleDriver();
-            }
-        } else {
-            // 启动 BLE 驱动
-            launchBleDriver();
+        if (isBleBridgeReachable()) {
+            requestBleConnection();
+            showInfo(
+                "BLE 配置驱动",
+                "BLE 配置驱动已就绪，正在查询 AhaKey 设备。Windows 麦克风是独立的音频通道。"
+            );
+            return;
         }
+        startBleDriver(true);
+    }
+
+    /**
+     * Start or reuse the bundled BLE bridge without requiring a separate
+     * button click. This method returns immediately and never terminates an
+     * externally launched driver.
+     */
+    public void startBundledBleDriver() {
+        startBleDriver(false);
     }
 
     private boolean isBleBridgeReachable() {
@@ -343,14 +178,6 @@ public class TopBar extends VBox {
             return true;
         } catch (Exception e) {
             return false;
-        }
-    }
-
-    private void stopBleDriverProcess() {
-        try {
-            new ProcessBuilder("taskkill", "/F", "/IM", "BLE_tcp_driver.exe").redirectErrorStream(true).start().waitFor();
-            Thread.sleep(300);
-        } catch (Exception ignored) {
         }
     }
     
@@ -378,68 +205,201 @@ public class TopBar extends VBox {
         return false;
     }
     
-    /**
-     * 启动同级目录下的 BLE_tcp_driver.exe
-     */
-    private void launchBleDriver() {
-        try {
-            // 获取应用所在目录
-            String appDir = System.getProperty("user.dir");
-            
-            // 尝试从 JAR 所在目录获取（打包后的情况）
-            try {
-                Path jarPath = Paths.get(getClass().getProtectionDomain().getCodeSource().getLocation().toURI());
-                if (jarPath.toString().endsWith(".jar")) {
-                    appDir = jarPath.getParent().toString();
+    private void startBleDriver(boolean interactive) {
+        synchronized (bleDriverLock) {
+            if (closing) return;
+            if (bleDriverStartInProgress) {
+                if (interactive) {
+                    Platform.runLater(() -> showInfo(
+                        "BLE 配置驱动",
+                        "BLE 配置驱动正在启动，请稍候。"
+                    ));
                 }
-            } catch (Exception ignored) {}
-            
-            File bleExe = null;
-            File appDirFile = new File(appDir);
-            
-            // 依次查找多个可能的位置
-            File[] candidates = {
-                new File(appDir, "BLE_tcp_driver.exe"),                                  // JAR 同级目录 (app/)
-                appDirFile.getParentFile() != null 
-                    ? new File(appDirFile.getParentFile(), "BLE_tcp_driver.exe") : null, // 父目录（jpackage 结构）
-                new File(System.getProperty("user.dir"), "BLE_tcp_driver.exe"),          // user.dir
-                new File(appDir, "app/BLE_tcp_driver.exe")                               // app 子目录
-            };
-            
-            for (File candidate : candidates) {
-                if (candidate != null && candidate.exists()) {
-                    bleExe = candidate;
+                return;
+            }
+            bleDriverStartInProgress = true;
+        }
+
+        Thread startup = new Thread(
+            () -> startOrReuseBleDriver(interactive),
+            "ble-driver-startup"
+        );
+        startup.setDaemon(true);
+        startup.start();
+    }
+
+    private void startOrReuseBleDriver(boolean interactive) {
+        Process observedProcess = null;
+        try {
+            if (isBleBridgeReachable()) {
+                try {
+                    var info = com.example.ahakey.service.BridgeLifecycle.inspect(9000);
+                    if (info.parentPid() != ProcessHandle.current().pid()) {
+                        reportBleFailure(interactive, "另一个 AhaKey 实例正在管理设备，请使用已运行的窗口。");
+                        return;
+                    }
+                } catch (java.io.IOException incompatible) {
+                    reportBleFailure(interactive, "检测到旧版独立 BLE 驱动。请退出旧驱动或更新安装后重新打开 Studio。");
+                    return;
+                }
+                requestBleConnection();
+                return;
+            }
+
+            synchronized (bleDriverLock) {
+                if (ownedBleDriverProcess != null && ownedBleDriverProcess.isAlive()) {
+                    observedProcess = ownedBleDriverProcess;
+                } else if (ownedBleDriverProcess != null) {
+                    ownedBleDriverProcess = null;
+                }
+            }
+
+            if (observedProcess == null && isBleDriverRunning()) {
+                logger.info("Reusing an externally started BLE_tcp_driver.exe");
+            } else if (observedProcess == null) {
+                File bleExe = findBundledBleDriver();
+                if (bleExe == null) {
+                    reportBleFailure(
+                        interactive,
+                        "当前安装不完整：未找到 BLE_tcp_driver.exe。Windows 麦克风仍可用于录音，" +
+                        "但它不代表 AhaKey 配置通道已连接。请安装包含 BLE 配置驱动的完整版本。"
+                    );
+                    return;
+                }
+
+                ProcessBuilder pb = new ProcessBuilder(
+                    bleExe.getAbsolutePath(),
+                    "--headless", "--parent-pid", Long.toString(ProcessHandle.current().pid()),
+                    "--lifecycle-token", bleLifecycleToken
+                );
+                pb.directory(bleExe.getParentFile());
+                // The WinForms bridge writes every discovery/status event to
+                // stdout. An unread ProcessBuilder pipe eventually fills and
+                // blocks its BLE callback thread. Its own UI retains the logs.
+                pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+                pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+                synchronized (bleDriverLock) {
+                    if (closing) return;
+                    observedProcess = pb.start();
+                    ownedBleDriverProcess = observedProcess;
+                }
+                logger.info(
+                    "Started bundled BLE driver at {} with PID {}",
+                    bleExe.getAbsolutePath(),
+                    observedProcess.pid()
+                );
+            }
+
+            for (int attempt = 0; attempt < 40; attempt++) {
+                if (closing) return;
+                if (isBleBridgeReachable()) {
+                    requestBleConnection();
+                    logger.info("BLE configuration bridge is ready on 127.0.0.1:9000");
+                    return;
+                }
+                if (observedProcess != null && !observedProcess.isAlive()) {
                     break;
                 }
+                Thread.sleep(250);
             }
-            
-            if (bleExe != null) {
-                final File finalBleExe = bleExe;
-                ProcessBuilder pb = new ProcessBuilder(finalBleExe.getAbsolutePath());
-                pb.directory(finalBleExe.getParentFile());
-                pb.start();
-                
-                // 短暂延迟后再次检查，给用户反馈
-                new Thread(() -> {
-                    try {
-                        Thread.sleep(1000);
-                        Platform.runLater(() -> {
-                            if (isBleDriverRunning()) {
-                                // 启动成功，无需额外提示
-                            } else {
-                                showAlert("BLE 驱动", "BLE 驱动启动失败，请手动运行: " + finalBleExe.getAbsolutePath());
-                            }
-                        });
-                    } catch (Exception ignored) {}
-                }).start();
-            } else {
-                showAlert("BLE 驱动", "未找到 BLE_tcp_driver.exe\n已尝试以下位置:\n" 
-                    + new File(appDir, "BLE_tcp_driver.exe").getAbsolutePath() + "\n"
-                    + (appDirFile.getParentFile() != null ? new File(appDirFile.getParentFile(), "BLE_tcp_driver.exe").getAbsolutePath() : "") + "\n"
-                    + new File(System.getProperty("user.dir"), "BLE_tcp_driver.exe").getAbsolutePath());
-            }
+            reportBleFailure(
+                interactive,
+                "BLE_tcp_driver.exe 已存在或已启动，但 10 秒内未提供本机配置服务 127.0.0.1:9000。" +
+                "首次使用可点击托盘中的 BLE TCP Bridge，选择设备并连接一次。" +
+                "AhaKey Studio 不会强制结束外部驱动。"
+            );
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         } catch (Exception e) {
-            showAlert("BLE 驱动", "启动失败: " + e.getMessage());
+            reportBleFailure(interactive, "启动失败: " + e.getMessage());
+        } finally {
+            synchronized (bleDriverLock) {
+                bleDriverStartInProgress = false;
+                if (ownedBleDriverProcess != null && !ownedBleDriverProcess.isAlive()) {
+                    ownedBleDriverProcess = null;
+                }
+            }
+        }
+    }
+
+    private File findBundledBleDriver() {
+        String appDir = System.getProperty("user.dir");
+        try {
+            Path jarPath = Paths.get(
+                getClass().getProtectionDomain().getCodeSource().getLocation().toURI()
+            );
+            if (jarPath.toString().endsWith(".jar")) {
+                appDir = jarPath.getParent().toString();
+            }
+        } catch (Exception ignored) {
+        }
+
+        File appDirFile = new File(appDir);
+        File[] candidates = {
+            new File(appDir, "ble/BLE_tcp_driver.exe"),
+            new File(appDir, "BLE_tcp_driver.exe"),
+            appDirFile.getParentFile() != null
+                ? new File(appDirFile.getParentFile(), "BLE_tcp_driver.exe") : null,
+            new File(System.getProperty("user.dir"), "BLE_tcp_driver.exe"),
+            new File(appDir, "app/BLE_tcp_driver.exe")
+        };
+        for (File candidate : candidates) {
+            if (candidate != null && candidate.isFile()) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private void requestBleConnection() {
+        Platform.runLater(() -> {
+            if (!controller.isEffectivelyConnected() && !deviceStatus.isScanning()) {
+                controller.userConnect();
+            }
+        });
+    }
+
+    private void reportBleFailure(boolean interactive, String message) {
+        logger.warn("BLE automatic startup failed: {}", message);
+        Platform.runLater(() -> {
+            studioState.syncStatusProperty().set(message);
+            if (interactive) {
+                showAlert("BLE 配置驱动", message);
+            }
+        });
+    }
+
+    /**
+     * Close transient UI and stop only the BLE process started by this TopBar.
+     */
+    public void shutdown() {
+        if (floatingNotification != null) {
+            floatingNotification.close();
+            floatingNotification = null;
+        }
+
+        Process process;
+        synchronized (bleDriverLock) {
+            closing = true;
+            process = ownedBleDriverProcess;
+            ownedBleDriverProcess = null;
+        }
+        if (process == null || !process.isAlive()) {
+            return;
+        }
+
+        logger.info("Stopping owned BLE driver PID {}", process.pid());
+        try {
+            boolean graceful = com.example.ahakey.service.BridgeLifecycle.stopOwned(
+                9000, process.pid(), ProcessHandle.current().pid(), bleLifecycleToken);
+            if (graceful && process.waitFor(4, java.util.concurrent.TimeUnit.SECONDS)) return;
+            process.destroy();
+            if (!process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
     
@@ -448,6 +408,14 @@ public class TopBar extends VBox {
      */
     private void showAlert(String title, String content) {
         Alert alert = new Alert(Alert.AlertType.WARNING);
+        alert.setTitle(title);
+        alert.setHeaderText(null);
+        alert.setContentText(content);
+        alert.showAndWait();
+    }
+
+    private void showInfo(String title, String content) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
         alert.setTitle(title);
         alert.setHeaderText(null);
         alert.setContentText(content);
@@ -477,10 +445,11 @@ public class TopBar extends VBox {
         voiceRunning = true;
         updateVoiceButtonState();
         setVoiceStatus("starting", "语音启动中");
+        voiceResultPreview.setText("本地转写预览：按住说话，松开后这里显示最终文字。");
         
         // 创建浮动通知窗口
         if (floatingNotification == null) {
-            floatingNotification = new FloatingVoiceNotification();
+            floatingNotification = new FloatingVoiceNotification(voiceRecordButton.getScene().getWindow());
         }
         
         // 设置状态回调（同时更新UI和浮动通知）
@@ -493,6 +462,11 @@ public class TopBar extends VBox {
             Platform.runLater(() -> {
                 // 更新 TopBar 状态
                 setVoiceStatus(code, message);
+                if ("error".equals(code) || "stopped".equals(code)) {
+                    voiceRunning = false;
+                    updateVoiceButtonState();
+                }
+                updateVoicePreviewForStatus(code);
                 
                 // 更新浮动通知
                 if (floatingNotification != null) {
@@ -504,11 +478,22 @@ public class TopBar extends VBox {
         // 启动语音输入管理器
         voiceInputManager.startVoiceInput(result -> {
             Platform.runLater(() -> {
-                voiceResultPreview.setText(result);
+                String finalResult = result == null ? "" : result.trim();
+                voiceResultPreview.setText(
+                    finalResult.isEmpty()
+                        ? "转写预览：未识别到文字"
+                        : "转写预览：" + finalResult
+                );
+                if (floatingNotification != null) {
+                    floatingNotification.showResult(finalResult);
+                }
             });
         }, partialResult -> {
             Platform.runLater(() -> {
-                voiceResultPreview.setText(partialResult);
+                if (partialResult != null && !partialResult.isBlank()) {
+                    voiceResultPreview.setText("转写处理中：" + partialResult.trim());
+                    if (floatingNotification != null) floatingNotification.showPartial(partialResult);
+                }
             });
         });
     }
@@ -537,7 +522,7 @@ public class TopBar extends VBox {
                 Thread.sleep(500);
                 Platform.runLater(() -> {
                     setVoiceStatus("stopped", "语音未启动");
-                    voiceResultPreview.setText("");
+                    voiceResultPreview.setText("本地转写预览：启动后按住说话，松开时显示最终文字。");
                 });
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -559,12 +544,26 @@ public class TopBar extends VBox {
             // 根据状态设置颜色
             String color = switch (status) {
                 case "stopped", "idle" -> "#A7AFBA";           // 空闲状态 - 灰色
-                case "starting", "stopping", "processing", "recognizing" -> "#F5A623";  // 处理/识别中 - 橙色
+                case "starting", "loading", "stopping", "processing", "recognizing" -> "#9c6915";
                 case "recording" -> "#E74C3C";                 // 录音中 - 红色
                 case "ready" -> "#2ECC71";                     // 就绪 - 绿色
                 default -> "#E74C3C"; // error
             };
             voiceStatusLabel.setStyle("-fx-text-fill: " + color + ";");
+        }
+    }
+
+    private void updateVoicePreviewForStatus(String status) {
+        if (voiceResultPreview == null) {
+            return;
+        }
+        switch (status) {
+            case "recording" -> voiceResultPreview.setText("本地转写预览：正在录音…");
+            case "recognizing" -> voiceStatusLabel.setText("正在校正最终文字…");
+            case "error" -> voiceResultPreview.setText("本地转写预览：语音服务不可用");
+            default -> {
+                // READY intentionally preserves the most recent final result.
+            }
         }
     }
     
@@ -574,7 +573,7 @@ public class TopBar extends VBox {
     private void updateVoiceButtonState() {
         if (voiceRecordButton == null) return;
         
-        if (voiceInputManager == null || !voiceInputManager.isEnabled()) {
+        if (voiceInputManager == null) {
             voiceRecordButton.setDisable(true);
             voiceRecordButton.setText("启动语音输入 (不可用)");
             setVoiceStatus("error", "语音服务未加载");
@@ -654,14 +653,20 @@ public class TopBar extends VBox {
         Label batteryStatus = new Label();
         batteryStatus.getStyleClass().add("dialog-text");
         batteryStatus.textProperty().bind(Bindings.createStringBinding(() ->
-            "电量: " + this.deviceStatus.getBatteryLevel() + "%",
+            "电量: " + (this.deviceStatus.isConnected() && this.deviceStatus.getBatteryLevel() >= 0
+                ? this.deviceStatus.getBatteryLevel() + "%" : "—"),
+            this.deviceStatus.isConnectedProperty(),
             this.deviceStatus.batteryLevelProperty()
         ));
         deviceRow1.getChildren().addAll(connStatus, batteryStatus);
 
         HBox deviceRow2 = new HBox(16);
-        Label deviceName = new Label("设备名: " + (this.deviceStatus.getDeviceName() != null ? this.deviceStatus.getDeviceName() : "—"));
+        Label deviceName = new Label();
         deviceName.getStyleClass().add("dialog-text");
+        deviceName.textProperty().bind(Bindings.createStringBinding(() ->
+            "设备名: " + (this.deviceStatus.getDeviceName() != null ? this.deviceStatus.getDeviceName() : "—"),
+            this.deviceStatus.deviceNameProperty()
+        ));
         Label switchState = new Label();
         switchState.getStyleClass().add("dialog-text");
         switchState.textProperty().bind(Bindings.createStringBinding(() ->
@@ -671,6 +676,39 @@ public class TopBar extends VBox {
         deviceRow2.getChildren().addAll(deviceName, switchState);
 
         deviceCard.getChildren().addAll(deviceTitle, deviceRow1, deviceRow2);
+
+        VBox hookRuntimeCard = new VBox(8);
+        hookRuntimeCard.getStyleClass().add("dialog-card");
+        hookRuntimeCard.setPadding(new Insets(12));
+        Label hookRuntimeTitle = new Label("Hook 运行状态");
+        hookRuntimeTitle.getStyleClass().add("dialog-card-title");
+        Label hookEndpoint = new Label();
+        hookEndpoint.getStyleClass().add("dialog-text");
+        Label hookObservation = new Label();
+        hookObservation.getStyleClass().add("dialog-text");
+        hookObservation.setWrapText(true);
+        Label hookBoundary = new Label(
+            "“已安装”只表示配置存在；只有“最近事件”出现后，才证明当前 Codex 事件真正到达 Studio。"
+        );
+        hookBoundary.getStyleClass().add("status-detail");
+        hookBoundary.setWrapText(true);
+        Button refreshHookRuntime = new Button("刷新运行状态");
+        Runnable updateHookRuntime = () -> {
+            int actualPort = controller.getHookDispatchPort();
+            hookEndpoint.setText(controller.isHookDispatchRunning() && actualPort > 0
+                ? "当前 endpoint: " + HookEndpoint.LOOPBACK_HOST + ":" + actualPort
+                : "当前 endpoint: 未运行");
+            hookObservation.setText(controller.getHookObservationSummary());
+        };
+        refreshHookRuntime.setOnAction(event -> updateHookRuntime.run());
+        updateHookRuntime.run();
+        hookRuntimeCard.getChildren().addAll(
+            hookRuntimeTitle,
+            hookEndpoint,
+            hookObservation,
+            hookBoundary,
+            refreshHookRuntime
+        );
 
         // 日志区域（提前创建以记录检测过程）
         logArea = new TextArea();
@@ -770,7 +808,16 @@ public class TopBar extends VBox {
         actionButtons.getChildren().addAll(connectBtn, disconnectBtn, clearLogBtn, closeBtn);
         actionButtons.setAlignment(Pos.CENTER_RIGHT);
 
-        content.getChildren().addAll(deviceCard, claudeCard, cursorCard, codexCard, kimiCard, logCard, actionButtons);
+        content.getChildren().addAll(
+            deviceCard,
+            hookRuntimeCard,
+            claudeCard,
+            cursorCard,
+            codexCard,
+            kimiCard,
+            logCard,
+            actionButtons
+        );
         scrollPane.setContent(content);
 
         Scene scene = new Scene(scrollPane);
@@ -832,7 +879,6 @@ public class TopBar extends VBox {
     // ==================== Hook 管理（与 Python 版完全对齐） ====================
 
     private static final ObjectMapper HOOK_MAPPER = new ObjectMapper();
-    private static final int HOOK_DISPATCH_PORT = 8765;
     private static final String CODEX_SIDECAR_NAME = ".ahakey_codex_hooks_v1";
     private static final String CODEX_HOOK_BLOCK_START = "# BEGIN AhaKey Codex Hooks";
     private static final String CODEX_HOOK_BLOCK_END = "# END AhaKey Codex Hooks";
@@ -852,9 +898,12 @@ public class TopBar extends VBox {
     };
     // Codex: 6 个事件（与 Python CODEX_HOOK_EVENTS 完全一致）
     private static final String[][] CODEX_EVENTS = {
-        {"SessionStart", "CodexSessionStart", "10"}, {"PostToolUse", "CodexPostToolUse", "10"},
-        {"PreToolUse", "CodexPreToolUse", "20"}, {"PermissionRequest", "CodexPermissionRequest", "20"},
-        {"UserPromptSubmit", "CodexUserPromptSubmit", "10"}, {"Stop", "CodexStop", "10"}
+        {"SessionStart", "CodexSessionStart", "10", "AhaKey Studio: 更新会话启动灯效"},
+        {"PostToolUse", "CodexPostToolUse", "10", "AhaKey Studio: 更新工具完成灯效"},
+        {"PreToolUse", "CodexPreToolUse", "20", "AhaKey Studio: 更新工具运行灯效"},
+        {"PermissionRequest", "CodexPermissionRequest", "20", "AhaKey Studio: 检查硬件审批拨杆"},
+        {"UserPromptSubmit", "CodexUserPromptSubmit", "10", "AhaKey Studio: 更新提问灯效"},
+        {"Stop", "CodexStop", "10", "AhaKey Studio: 更新任务停止灯效"}
     };
     // Kimi: 7 个事件（与 Python kimi_hooks.KIMI_HOOK_ENTRIES 完全一致）
     private static final String[][] KIMI_EVENTS = {
@@ -864,11 +913,8 @@ public class TopBar extends VBox {
         {"Stop", "KimiStop", "10"}
     };
 
-    private static final String HOOK_SCRIPT_NAME = "ahakey-hook.ps1";
-
     private Path getHookScriptPath() {
-        String home = System.getProperty("user.home");
-        return Paths.get(home, ".ahakey", "hooks", HOOK_SCRIPT_NAME);
+        return HookEndpoint.scriptPath();
     }
 
     private String buildHookCommand(String agentEvent) {
@@ -882,58 +928,8 @@ public class TopBar extends VBox {
      * 该脚本接收事件名参数，通过 TCP 发送到 Java HookDispatchServer，后者映射为 BLE 状态码。
      */
     private void generateHookScript() {
-        Path scriptPath = getHookScriptPath();
         try {
-            java.nio.file.Files.createDirectories(scriptPath.getParent());
-            String content =
-                "# AhaKey Hook Dispatcher - Auto-generated, do not edit\n" +
-                "# Receives hook event name as argument, dispatches to AhaKey Studio via TCP.\n" +
-                "# Compatible with Claude Code, Codex, Kimi, and Cursor hooks.\n" +
-                "param([Parameter(Position=0)][string]$EventName)\n" +
-                "try {\n" +
-                "    if ([Console]::IsInputRedirected) { $null = [Console]::In.ReadToEnd() }\n" +
-                "} catch { }\n" +
-                "try {\n" +
-                "    $tcp = New-Object System.Net.Sockets.TcpClient\n" +
-                "    $tcp.Connect('127.0.0.1', " + HOOK_DISPATCH_PORT + ")\n" +
-                "    $writer = New-Object System.IO.StreamWriter($tcp.GetStream())\n" +
-                "    $writer.WriteLine($EventName)\n" +
-                "    $writer.Flush()\n" +
-                "    $reader = New-Object System.IO.StreamReader($tcp.GetStream())\n" +
-                "    $response = $reader.ReadLine()\n" +
-                "    $tcp.Close()\n" +
-                "} catch {\n" +
-                "    $response = $null\n" +
-                "}\n" +
-                "# Codex lifecycle hooks must output exactly {} (Codex validates JSON schema)\n" +
-                "if ($EventName -match '^Codex' -and $EventName -ne 'CodexPermissionRequest') {\n" +
-                "    [Console]::WriteLine('{}')\n" +
-                "    exit 0\n" +
-                "}\n" +
-                "# Codex PermissionRequest: output hookSpecificOutput in Codex format\n" +
-                "if ($EventName -eq 'CodexPermissionRequest') {\n" +
-                "    $isAuto = $response -match '\"autoApproved\"\\s*:\\s*true'\n" +
-                "    if ($isAuto) {\n" +
-                "        [Console]::WriteLine('{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}')\n" +
-                "    } else {\n" +
-                "        [Console]::WriteLine('{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\"}}')\n" +
-                "    }\n" +
-                "    exit 0\n" +
-                "}\n" +
-                "# Claude PermissionRequest: output hookSpecificOutput in Claude format\n" +
-                "if ($EventName -eq 'PermissionRequest') {\n" +
-                "    $isAuto = $response -match '\"autoApproved\"\\s*:\\s*true'\n" +
-                "    if ($isAuto) {\n" +
-                "        [Console]::WriteLine('{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}')\n" +
-                "    } else {\n" +
-                "        [Console]::WriteLine('{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"ask\"}}}')\n" +
-                "    }\n" +
-                "    exit 0\n" +
-                "}\n" +
-                "# Kimi / Cursor: pass through server response\n" +
-                "if ($response) { [Console]::WriteLine($response) } else { [Console]::WriteLine('{\"ok\":true}') }\n" +
-                "exit 0\n";
-            java.nio.file.Files.write(scriptPath, content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            Path scriptPath = HookEndpoint.installPowerShellScript();
             addLog("[安装] 生成分发脚本: " + scriptPath);
         } catch (Exception e) {
             addLog("[警告] 生成分发脚本失败: " + e.getMessage());
@@ -982,8 +978,16 @@ public class TopBar extends VBox {
     }
 
     private boolean checkCodexHookInstalled() {
-        String home = System.getProperty("user.home");
-        return Paths.get(home, ".codex", CODEX_SIDECAR_NAME).toFile().exists();
+        Path hooksJson = getHookConfigPath("Codex");
+        if (!hooksJson.toFile().exists()) {
+            return false;
+        }
+        try {
+            return CodexHookConfig.containsManagedHandler(CodexHookConfig.read(hooksJson));
+        } catch (Exception e) {
+            addLog("[错误] 读取 Codex Hook 配置: " + e.getMessage());
+            return false;
+        }
     }
 
     private boolean checkKimiHookInstalled(Path path) {
@@ -1106,34 +1110,16 @@ public class TopBar extends VBox {
         try {
             java.nio.file.Files.createDirectories(hooksJson.getParent());
             backupFile(hooksJson);
-            // 构建 hooks.json（与 Python build_codex_hooks_json 完全一致）
-            ObjectNode hooks = HOOK_MAPPER.createObjectNode();
-            for (String[] ev : CODEX_EVENTS) {
-                ObjectNode cmd = HOOK_MAPPER.createObjectNode();
-                cmd.put("type", "command");
-                cmd.put("command", buildHookCommand(ev[1]));
-                cmd.put("timeout", Integer.parseInt(ev[2]));
-                ArrayNode innerArr = HOOK_MAPPER.createArrayNode();
-                innerArr.add(cmd);
-                ObjectNode entry = HOOK_MAPPER.createObjectNode();
-                if ("SessionStart".equals(ev[0])) {
-                    entry.put("matcher", "startup|resume|clear");
-                } else if ("UserPromptSubmit".equals(ev[0]) || "Stop".equals(ev[0])) {
-                    // no matcher
-                } else {
-                    entry.put("matcher", "*");
-                }
-                entry.set("hooks", innerArr);
-                ArrayNode outerArr = HOOK_MAPPER.createArrayNode();
-                outerArr.add(entry);
-                hooks.set(ev[0], outerArr);
-            }
-            ObjectNode root = HOOK_MAPPER.createObjectNode();
-            root.set("hooks", hooks);
-            HOOK_MAPPER.writerWithDefaultPrettyPrinter().writeValue(hooksJson.toFile(), root);
-            addLog("[成功] 已写入 " + hooksJson);
+            ObjectNode existing = CodexHookConfig.read(hooksJson);
+            ObjectNode merged = CodexHookConfig.install(existing, buildCodexHookDefinitions());
+            CodexHookConfig.write(hooksJson, merged);
+            addLog("[成功] 已合并写入 " + hooksJson + "（保留其他 Hook）");
             // 写入 sidecar 管理标记
-            java.nio.file.Files.write(sidecar, java.time.LocalDateTime.now().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            java.nio.file.Files.write(
+                sidecar,
+                ("AhaKey Studio Codex hooks v2\n" + java.time.LocalDateTime.now())
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8)
+            );
             // 更新 config.toml：确保 [features] hooks = true
             backupFile(configToml);
             String toml = configToml.toFile().exists()
@@ -1147,6 +1133,7 @@ public class TopBar extends VBox {
             java.nio.file.Files.write(configToml, toml.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             addLog("[成功] 已更新 " + configToml + "（[features].hooks = true）");
             addLog("[成功] 已注册 " + CODEX_EVENTS.length + " 个 Codex hook 事件");
+            addLog("[提示] Hook 定义已变化；请在 Codex /hooks 中审核并信任 AhaKey Studio。");
         } catch (Exception e) { addLog("[错误] Codex 安装失败: " + e.getMessage()); }
     }
 
@@ -1156,12 +1143,15 @@ public class TopBar extends VBox {
         Path configToml = Paths.get(home, ".codex", "config.toml");
         Path sidecar = Paths.get(home, ".codex", CODEX_SIDECAR_NAME);
         try {
+            if (hooksJson.toFile().exists()) {
+                backupFile(hooksJson);
+                ObjectNode existing = CodexHookConfig.read(hooksJson);
+                ObjectNode cleaned = CodexHookConfig.remove(existing);
+                CodexHookConfig.write(hooksJson, cleaned);
+                addLog("[成功] 已从 hooks.json 精确移除 AhaKey handlers，其他 Hook 保持不变");
+            }
             if (sidecar.toFile().exists()) {
                 java.nio.file.Files.delete(sidecar);
-                if (hooksJson.toFile().exists()) {
-                    java.nio.file.Files.delete(hooksJson);
-                    addLog("[成功] 已删除 " + hooksJson + "（由 AhaKey 安装器写入）");
-                }
             }
             if (configToml.toFile().exists()) {
                 String toml = new String(java.nio.file.Files.readAllBytes(configToml), java.nio.charset.StandardCharsets.UTF_8);
@@ -1173,6 +1163,28 @@ public class TopBar extends VBox {
             }
             addLog("[成功] Codex Hook 卸载完成");
         } catch (Exception e) { addLog("[错误] Codex 卸载失败: " + e.getMessage()); }
+    }
+
+    private List<CodexHookConfig.Definition> buildCodexHookDefinitions() {
+        List<CodexHookConfig.Definition> definitions = new ArrayList<>();
+        for (String[] event : CODEX_EVENTS) {
+            String matcher;
+            if ("SessionStart".equals(event[0])) {
+                matcher = "startup|resume|clear";
+            } else if ("UserPromptSubmit".equals(event[0]) || "Stop".equals(event[0])) {
+                matcher = null;
+            } else {
+                matcher = "*";
+            }
+            definitions.add(new CodexHookConfig.Definition(
+                event[0],
+                matcher,
+                buildHookCommand(event[1]),
+                Integer.parseInt(event[2]),
+                event[3]
+            ));
+        }
+        return definitions;
     }
 
     // ---- Kimi: ~/.kimi/config.toml（7 个事件，TOML [[hooks]] 块） ----

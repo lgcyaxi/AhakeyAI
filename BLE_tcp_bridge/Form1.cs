@@ -82,6 +82,22 @@ namespace BLE_tcp_driver
             bleCore.ReceiveNotifyData += ReceiveNotifyData;
             //bleCore.WriteDataSuccess += WriteDataSuccess;
             bleCore.AllCharacteristicsDiscovered += OnAllCharacteristicsDiscovered;
+            bleCore.ConnectionFailed += reason => BeginInvoke(new Action(() =>
+            {
+                autoConnecting = false;
+                targetConfirmed = false;
+                label_connected_devices.Text = "当前连接设备:无";
+                tcpServer?.ResetDeviceStatus();
+                log(Color.Red, reason);
+                if (config.HasSavedDevice) retryTimer?.Start();
+            }));
+            Application.ApplicationExit += (_, __) =>
+            {
+                retryTimer?.Stop();
+                tcpServer?.Stop();
+                bleCore.StopBleDeviceWatcher();
+                bleCore.Dispose();
+            };
             BindRichTextBoxContextMenu(rtbMsg);
 
             // 启动TCP服务器
@@ -116,6 +132,7 @@ namespace BLE_tcp_driver
 
         private void RetryTimer_Tick(object sender, EventArgs e)
         {
+            if (bleCore.IsConnecting) return;
             // 已连接则跳过
             if (bleCore.CurrentDevice != null &&
                 bleCore.CurrentDevice.ConnectionStatus == BluetoothConnectionStatus.Connected)
@@ -158,10 +175,20 @@ namespace BLE_tcp_driver
             {
                 if (string.IsNullOrEmpty(deviceInformation.Name)) return;
 
-                DeviceSelect.Items.Add(deviceInformation.Name);
-                devicesList.Add(deviceInformation);
-                if (DeviceSelect.SelectedIndex == -1)
-                    DeviceSelect.SelectedIndex = DeviceSelect.Items.Count - 1;
+                int existingIndex = devicesList.FindIndex(device =>
+                    string.Equals(device.Id, deviceInformation.Id, StringComparison.OrdinalIgnoreCase));
+                if (existingIndex >= 0)
+                {
+                    devicesList[existingIndex] = deviceInformation;
+                    DeviceSelect.Items[existingIndex] = deviceInformation.Name;
+                }
+                else
+                {
+                    DeviceSelect.Items.Add(deviceInformation.Name);
+                    devicesList.Add(deviceInformation);
+                    if (DeviceSelect.SelectedIndex == -1)
+                        DeviceSelect.SelectedIndex = DeviceSelect.Items.Count - 1;
+                }
 
                 // 自动连接: 匹配已保存的设备名称+MAC
                 if (config.HasSavedDevice && !autoConnecting)
@@ -188,6 +215,7 @@ namespace BLE_tcp_driver
                 retryTimer.Stop();
                 autoConnecting = false;
                 targetConfirmed = false;
+                tcpServer?.ResetDeviceStatus();
             }));
         }
 
@@ -198,6 +226,7 @@ namespace BLE_tcp_driver
                 log(Color.Red, "Disconnected:" + (bluetoothLEDevice?.Name ?? ""));
                 label_connected_devices.Text = "当前连接设备:无";
                 autoConnecting = false;
+                tcpServer?.ResetDeviceStatus();
 
                 if (config.HasSavedDevice)
                 {
@@ -278,6 +307,7 @@ namespace BLE_tcp_driver
                     log(Color.OrangeRed, $"设备 [{devName}] 未找齐目标UUID, 断开连接");
                     bleCore.Dispose();
                     label_connected_devices.Text = "当前连接设备:无";
+                    tcpServer?.ResetDeviceStatus();
 
                     if (config.HasSavedDevice)
                     {
