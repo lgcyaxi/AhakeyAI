@@ -81,3 +81,6 @@ target/
 # Firmware object files
 *.o
 obj_final/
+
+# Generated private Agent Knowledge cache
+/.tests/cache/agent-knowledge/

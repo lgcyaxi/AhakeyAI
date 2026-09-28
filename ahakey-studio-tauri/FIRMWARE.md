@@ -4,11 +4,11 @@
 
 - Hardware: **AhaKey X1, CH582M**. Do not flash a generic WCH development board,
   a different AhaKey model or an unidentified hardware revision.
-- Firmware: **0.1.17**, unofficial, community, experimental.
-- Companion client: AhaKey Studio **1.1.5**. The two version numbers are independent.
-- Download: [fork Release](https://github.com/lgcyaxi/AhakeyAI/releases/tag/ahakey-studio-1.1.5).
-- File: `AhaKey-X1-DualBLE-0.1.17.hex`.
-- SHA-256: `771efe5a1d16bd8530c3cd0dd64931c400a757f6bc18ff1175418f9530dd67e8`.
+- Firmware: **0.1.18**, unofficial, community, experimental.
+- Companion client: AhaKey Studio **1.1.6**. The two version numbers are independent.
+- Download: [fork Release](https://github.com/lgcyaxi/AhakeyAI/releases/tag/ahakey-studio-1.1.6).
+- File: `AhaKey-X1-DualBLE-0.1.18.hex`.
+- SHA-256: `e697bbc8d88d4883a86b046536e0724f70baa51a444b013f3a34a0be93aed182`.
 
 The HEX contains application code, not chip configuration or DataFlash records.
 The client neither downloads nor flashes it automatically. Building the Rust
@@ -68,7 +68,7 @@ controlled source, schematics, or modifications derived from controlled source.
 Commercial use or disclosure outside that scope needs additional permission.
 This notice does not relicense third-party components.
 
-The Release includes `AhaKey-X1-0.1.17-NOTICES.txt` and
-`AhaKey-X1-0.1.17-Apache-2.0.txt` with WCH, MultiButton and LwRB attribution.
+The Release includes `AhaKey-X1-0.1.18-NOTICES.txt` and
+`AhaKey-X1-0.1.18-Apache-2.0.txt` with WCH, MultiButton and LwRB attribution.
 Preserve these notices with the binary. This is not an official AhaKey firmware,
 and no warranty of fitness or recoverability is provided.

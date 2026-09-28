@@ -1,6 +1,6 @@
 # AhaKey Studio: Rust client
 
-Rust + Tauri 2 + React client, version 1.1.5. The client lives in the independent
+Rust + Tauri 2 + React client, version 1.1.6. The client lives in the independent
 `ahakey-studio-tauri/` subdirectory at the repository root; it does not replace
 the Java, Swift or bridge source trees.
 Windows x64 is the tested distribution target. macOS/Linux adapters exist but
@@ -10,8 +10,8 @@ not an official replacement for the original desktop suite.
 
 ## Companion firmware
 
-The [1.1.5 community Release](https://github.com/lgcyaxi/AhakeyAI/releases/tag/ahakey-studio-1.1.5)
-also offers **unofficial experimental firmware 0.1.17 for AhaKey X1 (CH582M)**.
+The [1.1.6 community Release](https://github.com/lgcyaxi/AhakeyAI/releases/tag/ahakey-studio-1.1.6)
+also offers **unofficial experimental firmware 0.1.18 for AhaKey X1 (CH582M)**.
 It adds simultaneous USB/two-BLE links, single-destination lever routing,
 bonded reconnect recovery and battery-only screen/light standby. The maintainer
 reports stable dual-host use; interoperability with every host is not guaranteed.
